@@ -1,0 +1,30 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:chainpay_test_db;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    username: sa
+    password: 
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+chainpay:
+  jwt:
+    secret: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+    expiration-ms: 3600000
+    refresh-expiration-ms: 86400000
+  web3:
+    rpc-url: http://localhost:8545
+    chain-id: 31337
+    confirmations-required: 2
+    hot-wallet-private-key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
