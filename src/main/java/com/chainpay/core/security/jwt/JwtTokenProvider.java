@@ -1,5 +1,6 @@
-package com.chainpay.core.security.user;
+package com.chainpay.core.security.jwt;
 
+import com.chainpay.core.security.user.UserPrincipal;
 import io.jsonwebtoken.*;
 import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
