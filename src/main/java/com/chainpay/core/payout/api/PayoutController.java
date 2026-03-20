@@ -18,6 +18,7 @@ import java.util.UUID;
 public class PayoutController {
 
     private final PayoutService payoutService;
+    private final com.chainpay.core.payout.service.BatchPayoutService batchPayoutService;
 
     @PostMapping
     @PreAuthorize("hasAnyRole('ADMIN', 'OPERATOR')")
@@ -39,5 +40,13 @@ public class PayoutController {
     public ResponseEntity<PayoutResponse> retryPayout(@PathVariable("id") UUID id, Authentication authentication) {
         String actor = authentication != null ? authentication.getName() : "OPERATOR";
         return ResponseEntity.ok(payoutService.retryPayout(id, actor));
+    }
+
+    @PostMapping("/batch")
+    @PreAuthorize("hasAnyRole('ADMIN', 'OPERATOR')")
+    public ResponseEntity<com.chainpay.core.payout.api.dto.BatchPayoutResponse> createBatchPayout(
+            @Valid @RequestBody com.chainpay.core.payout.api.dto.BatchPayoutRequest batchRequest
+    ) {
+        return ResponseEntity.ok(batchPayoutService.processBatchPayout(batchRequest));
     }
 }
