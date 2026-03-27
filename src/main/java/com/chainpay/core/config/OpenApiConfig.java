@@ -16,7 +16,7 @@ public class OpenApiConfig {
         final String securitySchemeName = "bearerAuth";
         return new OpenAPI()
                 .info(new Info()
-                        .title("ChainPay Core API")
+                        .title("ChainPay API")
                         .version("1.0.0")
                         .description("Blockchain Payout, Settlement & Stablecoin Double-Entry Ledger Service"))
                 .addSecurityItem(new SecurityRequirement().addList(securitySchemeName))
