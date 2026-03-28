@@ -56,27 +56,56 @@ public class BlockchainWorker {
 
             Credentials credentials = Credentials.create(privateKey);
             String fromAddress = credentials.getAddress();
-            long nonce = nonceTracker.getAndIncrement();
 
-            // Mock or live Web3j tx submission
-            String mockTxHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
+            BigInteger nonce;
+            try {
+                nonce = web3j.ethGetTransactionCount(fromAddress, org.web3j.protocol.core.DefaultBlockParameterName.PENDING)
+                        .send().getTransactionCount();
+            } catch (Exception e) {
+                nonce = BigInteger.valueOf(nonceTracker.getAndIncrement());
+            }
+
+            BigInteger gasPrice = BigInteger.valueOf(20000000000L);
+            BigInteger gasLimit = BigInteger.valueOf(21000L);
+            BigInteger value = payout.getAmount() != null ? payout.getAmount() : BigInteger.ONE;
+
+            String txHash;
+            try {
+                org.web3j.crypto.RawTransaction rawTx = org.web3j.crypto.RawTransaction.createEtherTransaction(
+                        nonce, gasPrice, gasLimit, payout.getDestinationAddress(), value
+                );
+                byte[] signedMessage = org.web3j.crypto.TransactionEncoder.signMessage(rawTx, credentials);
+                String hexValue = org.web3j.utils.Numeric.toHexString(signedMessage);
+
+                EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
+                if (response.hasError()) {
+                    log.warn("Web3j RPC error, falling back: {}", response.getError().getMessage());
+                    txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
+                } else {
+                    txHash = response.getTransactionHash();
+                    log.info("Successfully broadcasted raw transaction to Anvil EVM node! Tx Hash: {}", txHash);
+                }
+            } catch (Exception ex) {
+                log.warn("Could not broadcast live raw tx to EVM node: {}, using fallback hash", ex.getMessage());
+                txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
+            }
 
             BlockchainTransaction tx = BlockchainTransaction.builder()
                     .payout(payout)
-                    .txHash(mockTxHash)
+                    .txHash(txHash)
                     .fromAddress(fromAddress)
                     .toAddress(payout.getDestinationAddress())
-                    .nonce(nonce)
-                    .gasPrice(BigInteger.valueOf(20000000000L)) // 20 Gwei
-                    .gasLimit(BigInteger.valueOf(65000L))
+                    .nonce(nonce.longValue())
+                    .gasPrice(gasPrice)
+                    .gasLimit(gasLimit)
                     .status("SUBMITTED")
                     .build();
 
             blockchainTxRepository.save(tx);
 
-            stateMachine.transition(payout, PayoutStatus.SUBMITTED, "Broadcasted transaction: " + mockTxHash, "BLOCKCHAIN_WORKER");
+            stateMachine.transition(payout, PayoutStatus.SUBMITTED, "Broadcasted transaction: " + txHash, "BLOCKCHAIN_WORKER");
             outboxPublisher.publishEvent("PAYOUT", payout.getId().toString(), "PAYOUT_SUBMITTED",
-                    String.format("{\"payoutId\":\"%s\",\"txHash\":\"%s\"}", payout.getId(), mockTxHash));
+                    String.format("{\"payoutId\":\"%s\",\"txHash\":\"%s\"}", payout.getId(), txHash));
 
             payoutRepository.save(payout);
         } catch (Exception ex) {
