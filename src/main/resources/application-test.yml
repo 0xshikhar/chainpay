@@ -27,4 +27,5 @@ chainpay:
     rpc-url: http://localhost:8545
     chain-id: 31337
     confirmations-required: 2
-    hot-wallet-private-key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+    hot-wallet-private-key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    gateway-contract-address: "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"

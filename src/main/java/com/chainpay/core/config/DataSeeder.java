@@ -68,12 +68,26 @@ public class DataSeeder implements CommandLineRunner {
                     .decimals(6)
                     .build());
 
-            log.info("Seeded default USDC Asset (ID: {})", usdcAsset.getId());
+            Asset ethAsset = assetRepository.save(Asset.builder()
+                    .symbol("ETH")
+                    .contractAddress("0x0000000000000000000000000000000000000000")
+                    .chainId(31337L)
+                    .decimals(18)
+                    .build());
+
+            log.info("Seeded default Assets: USDC (ID: {}) and Native ETH (ID: {})", usdcAsset.getId(), ethAsset.getId());
 
             Account customerAccount = accountRepository.save(Account.builder()
                     .accountNumber("ACC-CUSTOMER-001")
                     .accountType(AccountType.CUSTOMER_AVAILABLE)
                     .asset(usdcAsset)
+                    .status(AccountStatus.ACTIVE)
+                    .build());
+
+            Account ethCustomerAccount = accountRepository.save(Account.builder()
+                    .accountNumber("ACC-CUSTOMER-ETH-001")
+                    .accountType(AccountType.CUSTOMER_AVAILABLE)
+                    .asset(ethAsset)
                     .status(AccountStatus.ACTIVE)
                     .build());
 
@@ -84,8 +98,8 @@ public class DataSeeder implements CommandLineRunner {
                     .status(AccountStatus.ACTIVE)
                     .build());
 
-            log.info("Seeded default Accounts: Customer (ID: {}) and Hot Wallet (ID: {})",
-                    customerAccount.getId(), hotWalletAccount.getId());
+            log.info("Seeded default Accounts: Customer USDC (ID: {}), Customer ETH (ID: {}), and Hot Wallet (ID: {})",
+                    customerAccount.getId(), ethCustomerAccount.getId(), hotWalletAccount.getId());
         }
     }
 }
