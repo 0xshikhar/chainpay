@@ -20,6 +20,10 @@ import java.util.List;
 public class GasManagementService {
 
     private final BlockchainTransactionRepository blockchainTransactionRepository;
+    private final org.web3j.protocol.Web3j web3j;
+
+    @Value("${chainpay.web3.hot-wallet-private-key}")
+    private String privateKey;
 
     @Value("${chainpay.web3.stuck-threshold-minutes:10}")
     private long stuckThresholdMinutes;
@@ -28,7 +32,6 @@ public class GasManagementService {
         if (currentGasPrice == null) {
             return BigInteger.valueOf(23000000000L); // Default 23 Gwei
         }
-        // Multiply gas price by 1.15 (115%) to bump stuck mempool transaction
         return currentGasPrice.multiply(BigInteger.valueOf(115)).divide(BigInteger.valueOf(100));
     }
 
@@ -43,10 +46,42 @@ public class GasManagementService {
             if (age.toMinutes() >= stuckThresholdMinutes) {
                 BigInteger oldGas = tx.getGasPrice();
                 BigInteger newGas = calculateBumpedGasPrice(oldGas);
-                tx.setGasPrice(newGas);
-                log.warn("GAS BUMPING: Transaction {} (nonce {}) stuck for {} min. Bumping gas from {} to {}",
-                        tx.getTxHash(), tx.getNonce(), age.toMinutes(), oldGas, newGas);
-                blockchainTransactionRepository.save(tx);
+
+                try {
+                    org.web3j.crypto.Credentials credentials = org.web3j.crypto.Credentials.create(privateKey);
+                    String fromAddress = credentials.getAddress();
+                    BigInteger minedNonceCount = web3j.ethGetTransactionCount(fromAddress, org.web3j.protocol.core.DefaultBlockParameterName.LATEST)
+                            .send().getTransactionCount();
+
+                    if (minedNonceCount.longValue() > tx.getNonce()) {
+                        log.info("Transaction {} (nonce {}) has ALREADY been mined on-chain! Skipping gas bump.", tx.getTxHash(), tx.getNonce());
+                        continue;
+                    }
+
+                    BigInteger nonce = BigInteger.valueOf(tx.getNonce());
+                    BigInteger gasLimit = tx.getGasLimit() != null ? tx.getGasLimit() : BigInteger.valueOf(21000L);
+
+                    org.web3j.crypto.RawTransaction rawTx = org.web3j.crypto.RawTransaction.createEtherTransaction(
+                            nonce, newGas, gasLimit, tx.getToAddress(), BigInteger.ONE
+                    );
+
+                    byte[] signedMessage = org.web3j.crypto.TransactionEncoder.signMessage(rawTx, credentials);
+                    String hexValue = org.web3j.utils.Numeric.toHexString(signedMessage);
+
+                    org.web3j.protocol.core.methods.response.EthSendTransaction response =
+                            web3j.ethSendRawTransaction(hexValue).send();
+
+                    if (!response.hasError()) {
+                        String newTxHash = response.getTransactionHash();
+                        log.warn("GAS BUMPED & RE-BROADCASTED! Stuck Tx {} (nonce {}) bumped from {} to {}. Replacement Tx Hash: {}",
+                                tx.getTxHash(), tx.getNonce(), oldGas, newGas, newTxHash);
+                        tx.setGasPrice(newGas);
+                        tx.setTxHash(newTxHash);
+                        blockchainTransactionRepository.save(tx);
+                    }
+                } catch (Exception ex) {
+                    log.error("Failed to re-broadcast bumped transaction for nonce {}: {}", tx.getNonce(), ex.getMessage());
+                }
             }
         }
     }

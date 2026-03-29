@@ -18,11 +18,14 @@ class GasManagementServiceTest {
     @Mock
     private BlockchainTransactionRepository transactionRepository;
 
+    @Mock
+    private org.web3j.protocol.Web3j web3j;
+
     private GasManagementService gasManagementService;
 
     @BeforeEach
     void setUp() {
-        gasManagementService = new GasManagementService(transactionRepository);
+        gasManagementService = new GasManagementService(transactionRepository, web3j);
     }
 
     @Test
