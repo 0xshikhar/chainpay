@@ -43,6 +43,15 @@ public class BlockchainTransaction {
     @Column(name = "gas_limit", precision = 38, scale = 0)
     private BigInteger gasLimit;
 
+    @Column(name = "gas_used", precision = 38, scale = 0)
+    private BigInteger gasUsed;
+
+    @Column(name = "tx_cost_eth", length = 64)
+    private String txCostEth;
+
+    @Column(name = "on_chain_memo", length = 255)
+    private String onChainMemo;
+
     @Column(name = "block_number")
     private Long blockNumber;
 

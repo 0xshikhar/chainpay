@@ -11,4 +11,7 @@ public interface BlockchainTransactionRepository extends JpaRepository<Blockchai
     Optional<BlockchainTransaction> findByTxHash(String txHash);
     Optional<BlockchainTransaction> findByPayoutId(UUID payoutId);
     List<BlockchainTransaction> findByStatus(String status);
+
+    @org.springframework.data.jpa.repository.Query("SELECT MAX(t.nonce) FROM BlockchainTransaction t WHERE t.fromAddress = :fromAddress")
+    Optional<Long> findMaxNonceByFromAddress(@org.springframework.data.repository.query.Param("fromAddress") String fromAddress);
 }
