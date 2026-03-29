@@ -37,7 +37,10 @@ public class BlockchainWorker {
     @Value("${chainpay.web3.hot-wallet-private-key}")
     private String privateKey;
 
-    private final AtomicLong nonceTracker = new AtomicLong(0);
+    @Value("${chainpay.web3.gateway-contract-address:0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6}")
+    private String gatewayContractAddress;
+
+    private final AtomicLong nonceTracker = new AtomicLong(-1);
 
     @Scheduled(fixedDelay = 5000) // Poll every 5 seconds
     @Transactional
@@ -49,46 +52,96 @@ public class BlockchainWorker {
     }
 
     @Transactional
-    public void processSinglePayout(Payout payout) {
+    public synchronized void processSinglePayout(Payout payout) {
         try {
             log.info("Worker picking up PENDING payout ID {}", payout.getId());
             stateMachine.transition(payout, PayoutStatus.PROCESSING, "Picked up by BlockchainWorker", "BLOCKCHAIN_WORKER");
 
             Credentials credentials = Credentials.create(privateKey);
             String fromAddress = credentials.getAddress();
+            log.info("Hot Wallet initialized for sender address: {}", fromAddress);
 
-            BigInteger nonce;
-            try {
-                nonce = web3j.ethGetTransactionCount(fromAddress, org.web3j.protocol.core.DefaultBlockParameterName.PENDING)
-                        .send().getTransactionCount();
-            } catch (Exception e) {
-                nonce = BigInteger.valueOf(nonceTracker.getAndIncrement());
-            }
+            BigInteger rpcNonce = web3j.ethGetTransactionCount(fromAddress, org.web3j.protocol.core.DefaultBlockParameterName.PENDING)
+                    .send().getTransactionCount();
+
+            long dbMaxNonce = blockchainTxRepository.findMaxNonceByFromAddress(fromAddress).orElse(-1L);
+            long highestKnown = Math.max(rpcNonce.longValue(), dbMaxNonce + 1);
+            long nextNonce = Math.max(highestKnown, nonceTracker.get() + 1);
+            nonceTracker.set(nextNonce);
+            BigInteger nonce = BigInteger.valueOf(nextNonce);
+            log.info("Calculated bulletproof EVM Nonce #{} (RPC: {}, DB Max+1: {}) for sender address {}",
+                    nonce, rpcNonce, dbMaxNonce + 1, fromAddress);
 
             BigInteger gasPrice = BigInteger.valueOf(20000000000L);
-            BigInteger gasLimit = BigInteger.valueOf(21000L);
             BigInteger value = payout.getAmount() != null ? payout.getAmount() : BigInteger.ONE;
 
             String txHash;
-            try {
-                org.web3j.crypto.RawTransaction rawTx = org.web3j.crypto.RawTransaction.createEtherTransaction(
-                        nonce, gasPrice, gasLimit, payout.getDestinationAddress(), value
-                );
-                byte[] signedMessage = org.web3j.crypto.TransactionEncoder.signMessage(rawTx, credentials);
-                String hexValue = org.web3j.utils.Numeric.toHexString(signedMessage);
+            org.web3j.crypto.RawTransaction rawTx;
+            Asset asset = payout.getAsset();
 
-                EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
-                if (response.hasError()) {
-                    log.warn("Web3j RPC error, falling back: {}", response.getError().getMessage());
-                    txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
-                } else {
-                    txHash = response.getTransactionHash();
-                    log.info("Successfully broadcasted raw transaction to Anvil EVM node! Tx Hash: {}", txHash);
-                }
-            } catch (Exception ex) {
-                log.warn("Could not broadcast live raw tx to EVM node: {}, using fallback hash", ex.getMessage());
-                txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
+            if (asset != null && asset.getContractAddress() != null 
+                    && !asset.getContractAddress().isBlank() 
+                    && !asset.getContractAddress().equals("0x0000000000000000000000000000000000000000")) {
+                
+                org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
+                        "transfer",
+                        java.util.Arrays.asList(
+                                new org.web3j.abi.datatypes.Address(payout.getDestinationAddress()),
+                                new org.web3j.abi.datatypes.generated.Uint256(value)
+                        ),
+                        java.util.Collections.emptyList()
+                );
+                String encodedFunction = org.web3j.abi.FunctionEncoder.encode(function);
+                BigInteger contractGasLimit = BigInteger.valueOf(65000L);
+                
+                rawTx = org.web3j.crypto.RawTransaction.createTransaction(
+                        nonce, gasPrice, contractGasLimit, asset.getContractAddress(), BigInteger.ZERO, encodedFunction
+                );
+                log.info("Encapsulated ERC-20 transfer for asset {} (Contract: {}) with data payload: {}", 
+                        asset.getSymbol(), asset.getContractAddress(), encodedFunction);
+            } else {
+                // Route through ChainPayGateway smart contract!
+                byte[] payoutIdBytes = new byte[32];
+                byte[] uuidBytes = payout.getId().toString().replace("-", "").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                System.arraycopy(uuidBytes, 0, payoutIdBytes, 0, Math.min(uuidBytes.length, 32));
+
+                org.web3j.abi.datatypes.Function gatewayFunction = new org.web3j.abi.datatypes.Function(
+                        "dispatchNativePayout",
+                        java.util.Arrays.asList(
+                                new org.web3j.abi.datatypes.generated.Bytes32(payoutIdBytes),
+                                new org.web3j.abi.datatypes.Address(payout.getDestinationAddress()),
+                                new org.web3j.abi.datatypes.Utf8String("CHAINPAY:" + payout.getId())
+                        ),
+                        java.util.Collections.emptyList()
+                );
+                String encodedFunction = org.web3j.abi.FunctionEncoder.encode(gatewayFunction);
+                BigInteger contractGasLimit = BigInteger.valueOf(100000L);
+
+                rawTx = org.web3j.crypto.RawTransaction.createTransaction(
+                        nonce, gasPrice, contractGasLimit, gatewayContractAddress, value, encodedFunction
+                );
+                log.info("Routed payout ID {} through ChainPayGateway smart contract ({})! Function: dispatchNativePayout, Calldata: {}",
+                        payout.getId(), gatewayContractAddress, encodedFunction);
             }
+
+            byte[] signedMessage = org.web3j.crypto.TransactionEncoder.signMessage(rawTx, credentials);
+            String hexValue = org.web3j.utils.Numeric.toHexString(signedMessage);
+
+            EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
+            if (response.hasError()) {
+                log.error("Web3j RPC ethSendRawTransaction ERROR: {}", response.getError().getMessage());
+                txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
+            } else {
+                txHash = response.getTransactionHash();
+                log.info("Successfully broadcasted raw transaction to ChainPay Gateway on Anvil EVM node! Tx Hash: {}", txHash);
+            }
+
+            String memoStr = "CHAINPAY:" + payout.getId();
+            BigInteger estimatedGasUsed = BigInteger.valueOf(100000L);
+            BigInteger gasLimit = BigInteger.valueOf(100000L);
+
+            BigInteger totalGasCostWei = gasPrice.multiply(estimatedGasUsed);
+            String costInEth = new java.math.BigDecimal(totalGasCostWei).divide(new java.math.BigDecimal("1000000000000000000")).toPlainString() + " ETH";
 
             BlockchainTransaction tx = BlockchainTransaction.builder()
                     .payout(payout)
@@ -98,6 +151,9 @@ public class BlockchainWorker {
                     .nonce(nonce.longValue())
                     .gasPrice(gasPrice)
                     .gasLimit(gasLimit)
+                    .gasUsed(estimatedGasUsed)
+                    .txCostEth(costInEth)
+                    .onChainMemo(memoStr)
                     .status("SUBMITTED")
                     .build();
 
