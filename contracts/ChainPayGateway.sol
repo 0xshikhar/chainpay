@@ -29,6 +29,13 @@ contract ChainPayGateway {
         owner = msg.sender;
     }
 
+    event BatchPayoutDispatched(
+        bytes32 indexed batchId,
+        uint256 totalCount,
+        uint256 totalAmount,
+        uint256 timestamp
+    );
+
     /**
      * @notice Dispatch native ETH payout with on-chain reference memo
      */
@@ -48,6 +55,49 @@ contract ChainPayGateway {
             recipient,
             msg.value,
             memo,
+            block.timestamp
+        );
+    }
+
+    /**
+     * @notice Dispatch batch Native ETH payouts in a single transaction
+     */
+    function dispatchBatchPayout(
+        bytes32 batchId,
+        bytes32[] calldata payoutIds,
+        address payable[] calldata recipients,
+        uint256[] calldata amounts,
+        string[] calldata memos
+    ) external payable onlyOwner {
+        require(payoutIds.length == recipients.length && recipients.length == amounts.length && amounts.length == memos.length, "ChainPayGateway: array length mismatch");
+        require(payoutIds.length > 0, "ChainPayGateway: empty batch");
+
+        uint256 totalDispatched = 0;
+
+        for (uint256 i = 0; i < recipients.length; i++) {
+            require(amounts[i] > 0, "ChainPayGateway: invalid transfer amount");
+            (bool success, ) = recipients[i].call{value: amounts[i]}("");
+            require(success, "ChainPayGateway: batch transfer failed");
+
+            totalDispatched += amounts[i];
+
+            emit PayoutDispatched(
+                payoutIds[i],
+                msg.sender,
+                address(0),
+                recipients[i],
+                amounts[i],
+                memos[i],
+                block.timestamp
+            );
+        }
+
+        require(msg.value >= totalDispatched, "ChainPayGateway: insufficient msg.value for batch");
+
+        emit BatchPayoutDispatched(
+            batchId,
+            recipients.length,
+            totalDispatched,
             block.timestamp
         );
     }

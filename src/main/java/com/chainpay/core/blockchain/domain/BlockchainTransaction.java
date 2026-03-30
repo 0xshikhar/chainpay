@@ -25,7 +25,7 @@ public class BlockchainTransaction {
     @JoinColumn(name = "payout_id")
     private Payout payout;
 
-    @Column(name = "tx_hash", nullable = false, unique = true, length = 66)
+    @Column(name = "tx_hash", nullable = false, length = 66)
     private String txHash;
 
     @Column(name = "from_address", nullable = false, length = 64)
