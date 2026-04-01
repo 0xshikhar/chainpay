@@ -137,16 +137,14 @@ public class BlockchainWorker {
             String hexValue = org.web3j.utils.Numeric.toHexString(signedMessage);
 
             EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
-            String txHash;
-
             if (response.hasError()) {
                 log.error("Web3j Batch RPC ERROR: {}", response.getError().getMessage());
-                txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
-            } else {
-                txHash = response.getTransactionHash();
-                log.info("🎉 BATCH DISPATCH SUCCESSFUL! Broadcasted {} payouts in SINGLE EVM Tx Hash: {} to Gateway ({})",
-                        batchList.size(), txHash, gatewayContractAddress);
+                throw new RuntimeException("Web3j Batch RPC error: " + response.getError().getMessage());
             }
+
+            String txHash = response.getTransactionHash();
+            log.info("🎉 BATCH DISPATCH SUCCESSFUL! Broadcasted {} payouts in SINGLE EVM Tx Hash: {} to Gateway ({})",
+                    batchList.size(), txHash, gatewayContractAddress);
 
             for (Payout payout : batchList) {
                 String memoStr = "CHAINPAY:" + payout.getId();
@@ -263,11 +261,11 @@ public class BlockchainWorker {
             EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
             if (response.hasError()) {
                 log.error("Web3j RPC ethSendRawTransaction ERROR: {}", response.getError().getMessage());
-                txHash = "0x" + UUID.randomUUID().toString().replace("-", "") + "00000000000000000000000000000000";
-            } else {
-                txHash = response.getTransactionHash();
-                log.info("Successfully broadcasted raw transaction to ChainPay Gateway on Anvil EVM node! Tx Hash: {}", txHash);
+                throw new RuntimeException("Web3j RPC error: " + response.getError().getMessage());
             }
+
+            txHash = response.getTransactionHash();
+            log.info("Successfully broadcasted raw transaction to ChainPay Gateway on Anvil EVM node! Tx Hash: {}", txHash);
 
             String memoStr = "CHAINPAY:" + payout.getId();
             BigInteger estimatedGasUsed = BigInteger.valueOf(100000L);

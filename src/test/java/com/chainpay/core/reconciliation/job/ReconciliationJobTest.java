@@ -34,6 +34,15 @@ class ReconciliationJobTest {
     @Mock
     private ReconciliationReportRepository reportRepository;
 
+    @Mock
+    private com.chainpay.core.ledger.repository.AccountRepository accountRepository;
+
+    @Mock
+    private com.chainpay.core.ledger.service.LedgerService ledgerService;
+
+    @Mock
+    private org.web3j.protocol.Web3j web3j;
+
     @InjectMocks
     private ReconciliationJob reconciliationJob;
 

@@ -29,8 +29,18 @@ public class GasManagementService {
     private long stuckThresholdMinutes;
 
     public BigInteger calculateBumpedGasPrice(BigInteger currentGasPrice) {
-        if (currentGasPrice == null) {
-            return BigInteger.valueOf(23000000000L); // Default 23 Gwei
+        if (currentGasPrice == null || currentGasPrice.equals(BigInteger.ZERO)) {
+            try {
+                org.web3j.protocol.core.methods.response.EthGasPrice ethGasPrice = web3j.ethGasPrice().send();
+                if (!ethGasPrice.hasError() && ethGasPrice.getGasPrice() != null) {
+                    currentGasPrice = ethGasPrice.getGasPrice();
+                } else {
+                    currentGasPrice = BigInteger.valueOf(20000000000L); // 20 Gwei baseline
+                }
+            } catch (Exception ex) {
+                log.warn("Failed to fetch live gas price via Web3j: {}. Falling back to 20 Gwei baseline", ex.getMessage());
+                currentGasPrice = BigInteger.valueOf(20000000000L);
+            }
         }
         return currentGasPrice.multiply(BigInteger.valueOf(115)).divide(BigInteger.valueOf(100));
     }
