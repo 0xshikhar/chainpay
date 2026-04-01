@@ -1,0 +1,42 @@
+name: ChainPay Core CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+
+jobs:
+  build-and-test:
+    name: Build, Audit & Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: ☕ Setup Java JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: 🔐 Grant Execute Permission for Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: 🛠 Compile & Verify Gradle Dependencies
+        run: ./gradlew compileJava compileTestJava --no-daemon
+
+      - name: 🧪 Execute Unit, Integration & Concurrency Test Suite
+        run: ./gradlew test --no-daemon
+
+      - name: 📦 Build Executable Production Boot JAR
+        run: ./gradlew bootJar --no-daemon
+
+      - name: 📊 Upload Test Results & Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports
+          path: build/reports/tests/test/
