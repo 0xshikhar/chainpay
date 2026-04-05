@@ -49,6 +49,12 @@ public class LedgerService {
             Asset asset = assetRepository.findById(entryReq.getAssetId())
                     .orElseThrow(() -> new ResourceNotFoundException("Asset not found with ID: " + entryReq.getAssetId()));
 
+            // Verify account status is ACTIVE (P1 fix: reject journal entries against SUSPENDED/QUARANTINED accounts)
+            if (account.getStatus() != AccountStatus.ACTIVE) {
+                throw new InvalidLedgerTransactionException("Cannot post transaction to account " +
+                        account.getAccountNumber() + " in status " + account.getStatus());
+            }
+
             // Verify account asset matches entry asset
             if (!account.getAsset().getId().equals(asset.getId())) {
                 throw new InvalidLedgerTransactionException("Account asset (" + account.getAsset().getSymbol() +

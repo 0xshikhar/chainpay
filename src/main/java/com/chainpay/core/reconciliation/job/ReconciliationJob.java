@@ -1,7 +1,13 @@
 package com.chainpay.core.reconciliation.job;
 
 import com.chainpay.core.blockchain.domain.BlockchainTransaction;
+import com.chainpay.core.blockchain.domain.BlockchainTxStatus;
 import com.chainpay.core.blockchain.repository.BlockchainTransactionRepository;
+import com.chainpay.core.ledger.api.dto.BalanceResponse;
+import com.chainpay.core.ledger.domain.Account;
+import com.chainpay.core.ledger.domain.AccountType;
+import com.chainpay.core.ledger.repository.AccountRepository;
+import com.chainpay.core.ledger.service.LedgerService;
 import com.chainpay.core.payout.domain.Payout;
 import com.chainpay.core.payout.domain.PayoutStatus;
 import com.chainpay.core.payout.repository.PayoutRepository;
@@ -12,8 +18,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.methods.response.EthGetBalance;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.List;
 
 @Slf4j
@@ -24,95 +36,93 @@ public class ReconciliationJob {
     private final PayoutRepository payoutRepository;
     private final BlockchainTransactionRepository blockchainTransactionRepository;
     private final ReconciliationReportRepository reportRepository;
-    private final com.chainpay.core.ledger.repository.AccountRepository accountRepository;
-    private final com.chainpay.core.ledger.service.LedgerService ledgerService;
-    private final org.web3j.protocol.Web3j web3j;
-
-    @org.springframework.beans.factory.annotation.Value("${chainpay.web3.hot-wallet-private-key}")
-    private String privateKey;
+    private final AccountRepository accountRepository;
+    private final LedgerService ledgerService;
+    private final Web3j web3j;
+    private final String hotWalletAddress;
 
     @Scheduled(cron = "0 0 * * * *") // Every hour
     @Transactional
     public ReconciliationReport runReconciliation() {
         log.info("Starting scheduled 3-way Financial & Live Blockchain Reconciliation Job...");
 
+        // Save initial report record so partial execution or mid-run failure doesn't lose the run context (P1 fix)
         ReconciliationReport report = ReconciliationReport.builder()
-                .status("PASSED")
+                .status("RUNNING")
                 .totalChecked(0)
                 .discrepancyCount(0)
                 .build();
+        report = reportRepository.save(report);
 
-        List<Payout> completedPayouts = payoutRepository.findByStatus(PayoutStatus.COMPLETED);
-        report.setTotalChecked(completedPayouts.size());
-
-        // 1. Transaction Reconciliation
-        for (Payout payout : completedPayouts) {
-            BlockchainTransaction tx = blockchainTransactionRepository.findByPayoutId(payout.getId()).orElse(null);
-
-            if (tx == null) {
-                ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
-                        .discrepancyType("MISSING_ON_CHAIN")
-                        .description("Payout ID " + payout.getId() + " is marked COMPLETED in ledger but has no blockchain transaction record!")
-                        .severity("HIGH")
-                        .build();
-                report.addDiscrepancy(discrepancy);
-            } else if (!"CONFIRMED".equalsIgnoreCase(tx.getStatus())) {
-                ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
-                        .discrepancyType("STATUS_MISMATCH")
-                        .description("Payout ID " + payout.getId() + " is COMPLETED but on-chain status is " + tx.getStatus())
-                        .severity("MEDIUM")
-                        .build();
-                report.addDiscrepancy(discrepancy);
-            }
-        }
-
-        // 2. Real On-Chain RPC Hot Wallet Balance & Ledger Audit
         try {
-            org.web3j.crypto.Credentials credentials = org.web3j.crypto.Credentials.create(privateKey);
-            String hotWalletAddress = credentials.getAddress();
+            List<Payout> completedPayouts = payoutRepository.findByStatus(PayoutStatus.COMPLETED);
+            report.setTotalChecked(completedPayouts.size());
 
-            org.web3j.protocol.core.methods.response.EthGetBalance ethBalanceResp =
-                    web3j.ethGetBalance(hotWalletAddress, org.web3j.protocol.core.DefaultBlockParameterName.LATEST).send();
+            // 1. Transaction Reconciliation
+            for (Payout payout : completedPayouts) {
+                BlockchainTransaction tx = blockchainTransactionRepository.findByPayoutId(payout.getId()).orElse(null);
 
-            if (!ethBalanceResp.hasError()) {
-                java.math.BigInteger onChainBalanceWei = ethBalanceResp.getBalance();
-                String ethStr = new java.math.BigDecimal(onChainBalanceWei)
-                        .divide(new java.math.BigDecimal("1000000000000000000")).toPlainString();
-
-                log.info("LIVE ON-CHAIN RECONCILIATION: Hot Wallet [{}] Real EVM Node Balance: {} Wei ({} ETH)",
-                        hotWalletAddress, onChainBalanceWei, ethStr);
-
-                // Fetch ledger Hot Wallet account balance if exists
-                List<com.chainpay.core.ledger.domain.Account> hotWalletAccounts = accountRepository.findAll().stream()
-                        .filter(a -> a.getAccountType() == com.chainpay.core.ledger.domain.AccountType.SYSTEM_HOT_WALLET)
-                        .toList();
-
-                for (com.chainpay.core.ledger.domain.Account acc : hotWalletAccounts) {
-                    com.chainpay.core.ledger.api.dto.BalanceResponse ledgerBal = ledgerService.getAccountBalance(acc.getId());
-                    java.math.BigInteger ledgerBalanceBase = ledgerBal.getBalanceBaseUnits();
-
-                    // If ledger balance exceeds live EVM balance, flag potential insolvency/drift
-                    if (ledgerBalanceBase != null && ledgerBalanceBase.compareTo(onChainBalanceWei) > 0) {
-                        ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
-                                .discrepancyType("HOT_WALLET_BALANCE_MISMATCH")
-                                .description(String.format("System Hot Wallet [%s] ledger balance (%s) exceeds live EVM node balance (%s Wei)",
-                                        acc.getAccountNumber(), ledgerBalanceBase, onChainBalanceWei))
-                                .severity("HIGH")
-                                .build();
-                        report.addDiscrepancy(discrepancy);
-                        log.warn("HOT WALLET DISCREPANCY DETECTED: Ledger balance {} > On-Chain balance {}", ledgerBalanceBase, onChainBalanceWei);
-                    }
+                if (tx == null) {
+                    ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
+                            .discrepancyType("MISSING_ON_CHAIN")
+                            .description("Payout ID " + payout.getId() + " is marked COMPLETED in ledger but has no blockchain transaction record!")
+                            .severity("HIGH")
+                            .build();
+                    report.addDiscrepancy(discrepancy);
+                } else if (tx.getStatus() != BlockchainTxStatus.CONFIRMED) {
+                    ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
+                            .discrepancyType("STATUS_MISMATCH")
+                            .description("Payout ID " + payout.getId() + " is COMPLETED but on-chain status is " + tx.getStatus())
+                            .severity("MEDIUM")
+                            .build();
+                    report.addDiscrepancy(discrepancy);
                 }
-            } else {
-                log.warn("Failed to fetch on-chain ETH balance for hot wallet {}: {}",
-                        hotWalletAddress, ethBalanceResp.getError().getMessage());
             }
-        } catch (Exception ex) {
-            log.error("Live Web3 RPC balance reconciliation failed: {}", ex.getMessage(), ex);
-        }
 
-        if (report.getDiscrepancyCount() > 0) {
-            report.setStatus("DISCREPANCY_FOUND");
+            // 2. Real On-Chain RPC Hot Wallet Balance & Ledger Audit (uses injected hotWalletAddress - P1 fix)
+            try {
+                EthGetBalance ethBalanceResp = web3j.ethGetBalance(hotWalletAddress, DefaultBlockParameterName.LATEST).send();
+
+                if (!ethBalanceResp.hasError()) {
+                    BigInteger onChainBalanceWei = ethBalanceResp.getBalance();
+                    String ethStr = new BigDecimal(onChainBalanceWei)
+                            .divide(new BigDecimal("1000000000000000000")).toPlainString();
+
+                    log.info("[RECONCILIATION] Hot Wallet [{}] Real EVM Balance: {} Wei ({} ETH)",
+                            hotWalletAddress, onChainBalanceWei, ethStr);
+
+                    List<Account> hotWalletAccounts = accountRepository.findAll().stream()
+                            .filter(a -> a.getAccountType() == AccountType.SYSTEM_HOT_WALLET)
+                            .toList();
+
+                    for (Account acc : hotWalletAccounts) {
+                        BalanceResponse ledgerBal = ledgerService.getAccountBalance(acc.getId());
+                        BigInteger ledgerBalanceBase = ledgerBal.getBalanceBaseUnits();
+
+                        if (ledgerBalanceBase != null && ledgerBalanceBase.compareTo(onChainBalanceWei) > 0) {
+                            ReconciliationDiscrepancy discrepancy = ReconciliationDiscrepancy.builder()
+                                    .discrepancyType("HOT_WALLET_BALANCE_MISMATCH")
+                                    .description(String.format("System Hot Wallet [%s] ledger balance (%s) exceeds live EVM balance (%s Wei)",
+                                            acc.getAccountNumber(), ledgerBalanceBase, onChainBalanceWei))
+                                    .severity("HIGH")
+                                    .build();
+                            report.addDiscrepancy(discrepancy);
+                            log.warn("[RECONCILIATION] DISCREPANCY: Ledger balance {} > On-Chain balance {}",
+                                    ledgerBalanceBase, onChainBalanceWei);
+                        }
+                    }
+                } else {
+                    log.warn("[RECONCILIATION] Failed to fetch on-chain balance for hot wallet {}: {}",
+                            hotWalletAddress, ethBalanceResp.getError().getMessage());
+                }
+            } catch (Exception ex) {
+                log.error("[RECONCILIATION] Web3 RPC balance query failed: {}", ex.getMessage());
+            }
+
+            report.setStatus(report.getDiscrepancyCount() > 0 ? "DISCREPANCY_FOUND" : "PASSED");
+        } catch (Exception ex) {
+            log.error("[RECONCILIATION] Unexpected failure during reconciliation run: {}", ex.getMessage(), ex);
+            report.setStatus("FAILED");
         }
 
         ReconciliationReport savedReport = reportRepository.save(report);

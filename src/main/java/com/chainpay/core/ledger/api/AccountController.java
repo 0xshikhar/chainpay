@@ -53,6 +53,20 @@ public class AccountController {
         return ResponseEntity.ok(accountRepository.save(account));
     }
 
+    @GetMapping
+    @PreAuthorize("hasAnyRole('ADMIN', 'OPERATOR', 'VIEWER')")
+    public ResponseEntity<java.util.List<Account>> getAllAccounts() {
+        return ResponseEntity.ok(accountRepository.findAll());
+    }
+
+    @GetMapping("/lookup/{accountNumber}")
+    @PreAuthorize("hasAnyRole('ADMIN', 'OPERATOR', 'VIEWER')")
+    public ResponseEntity<Account> getAccountByNumber(@PathVariable("accountNumber") String accountNumber) {
+        Account account = accountRepository.findByAccountNumber(accountNumber)
+                .orElseThrow(() -> new ResourceNotFoundException("Account not found with number: " + accountNumber));
+        return ResponseEntity.ok(account);
+    }
+
     @GetMapping("/{id}/balance")
     @PreAuthorize("hasAnyRole('ADMIN', 'OPERATOR', 'VIEWER')")
     public ResponseEntity<BalanceResponse> getBalance(@PathVariable("id") UUID accountId) {
