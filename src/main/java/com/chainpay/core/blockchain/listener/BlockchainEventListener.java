@@ -1,7 +1,9 @@
 package com.chainpay.core.blockchain.listener;
 
 import com.chainpay.core.blockchain.domain.BlockchainTransaction;
+import com.chainpay.core.blockchain.domain.BlockchainTxStatus;
 import com.chainpay.core.blockchain.repository.BlockchainTransactionRepository;
+import com.chainpay.core.blockchain.service.GasCostAccountingService;
 import com.chainpay.core.payout.domain.Payout;
 import com.chainpay.core.payout.domain.PayoutStatus;
 import com.chainpay.core.payout.repository.PayoutRepository;
@@ -13,7 +15,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.List;
 
@@ -26,7 +32,8 @@ public class BlockchainEventListener {
     private final PayoutRepository payoutRepository;
     private final PayoutStateMachine stateMachine;
     private final OutboxPublisherService outboxPublisher;
-    private final org.web3j.protocol.Web3j web3j;
+    private final GasCostAccountingService gasCostAccountingService;
+    private final Web3j web3j;
 
     @Value("${chainpay.web3.confirmations-required:12}")
     private int confirmationsRequired;
@@ -34,20 +41,18 @@ public class BlockchainEventListener {
     @Scheduled(fixedDelay = 5000)
     @Transactional
     public void trackConfirmations() {
-        List<BlockchainTransaction> pendingTxs = blockchainTxRepository.findByStatus("SUBMITTED");
+        List<BlockchainTransaction> pendingTxs = blockchainTxRepository.findByStatus(BlockchainTxStatus.SUBMITTED);
         for (BlockchainTransaction tx : pendingTxs) {
             try {
-                org.web3j.protocol.core.methods.response.EthGetTransactionReceipt receiptResp =
-                        web3j.ethGetTransactionReceipt(tx.getTxHash()).send();
+                EthGetTransactionReceipt receiptResp = web3j.ethGetTransactionReceipt(tx.getTxHash()).send();
 
                 if (receiptResp.getTransactionReceipt().isPresent()) {
-                    org.web3j.protocol.core.methods.response.TransactionReceipt receipt =
-                            receiptResp.getTransactionReceipt().get();
+                    TransactionReceipt receipt = receiptResp.getTransactionReceipt().get();
 
                     // Verify EVM execution status (0x1 = Success, 0x0 = Revert)
                     if (!receipt.isStatusOK()) {
-                        log.error("EVM Transaction REVERTED on-chain! Tx Hash: {}", tx.getTxHash());
-                        tx.setStatus("REVERTED");
+                        log.error("[EVENT-LISTENER] EVM Transaction REVERTED on-chain! Tx Hash: {}", tx.getTxHash());
+                        tx.setStatus(BlockchainTxStatus.REVERTED);
                         Payout payout = tx.getPayout();
                         if (payout != null) {
                             stateMachine.transition(payout, PayoutStatus.FAILED_PERMANENTLY,
@@ -66,6 +71,14 @@ public class BlockchainEventListener {
                     tx.setGasUsed(receipt.getGasUsed());
                     tx.setConfirmations(realConfirmations);
 
+                    // Update real eth cost based on actual receipt gasUsed
+                    if (tx.getGasPrice() != null && receipt.getGasUsed() != null) {
+                        BigInteger actualGasCostWei = tx.getGasPrice().multiply(receipt.getGasUsed());
+                        String actualCostEth = new BigDecimal(actualGasCostWei)
+                                .divide(new BigDecimal("1000000000000000000")).toPlainString() + " ETH";
+                        tx.setTxCostEth(actualCostEth);
+                    }
+
                     Payout payout = tx.getPayout();
                     if (payout != null) {
                         if (realConfirmations >= 1 && payout.getStatus() == PayoutStatus.SUBMITTED) {
@@ -75,23 +88,30 @@ public class BlockchainEventListener {
                         }
 
                         if (realConfirmations >= confirmationsRequired && payout.getStatus() == PayoutStatus.CONFIRMING) {
-                            tx.setStatus("CONFIRMED");
+                            tx.setStatus(BlockchainTxStatus.CONFIRMED);
                             stateMachine.transition(payout, PayoutStatus.COMPLETED,
                                     "Accrued " + realConfirmations + " real on-chain confirmations", "EVENT_LISTENER");
                             payoutRepository.save(payout);
+
+                            // Settle actual gas cost fee on double-entry ledger upon EVM confirmation (P1 fix)
+                            try {
+                                gasCostAccountingService.settleGasFeeForPayout(payout, tx.getGasPrice(), receipt.getGasUsed());
+                            } catch (Exception ex) {
+                                log.warn("[EVENT-LISTENER] Gas cost settlement notice for payout {}: {}", payout.getId(), ex.getMessage());
+                            }
 
                             outboxPublisher.publishEvent("PAYOUT", payout.getId().toString(), "PAYOUT_COMPLETED",
                                     String.format("{\"payoutId\":\"%s\",\"status\":\"COMPLETED\",\"txHash\":\"%s\",\"blockNumber\":%d}",
                                             payout.getId(), tx.getTxHash(), minedBlock.longValue()));
 
-                            log.info("Payout ID {} completed with {} real EVM block confirmations! Mined in block #{}",
+                            log.info("[EVENT-LISTENER] Payout ID {} completed with {} real EVM block confirmations! Mined in block #{}",
                                     payout.getId(), realConfirmations, minedBlock);
                         }
                     }
                     blockchainTxRepository.save(tx);
                 }
             } catch (Exception ex) {
-                log.warn("RPC query for transaction receipt {} failed: {}", tx.getTxHash(), ex.getMessage());
+                log.warn("[EVENT-LISTENER] RPC query for transaction receipt {} failed: {}", tx.getTxHash(), ex.getMessage());
             }
         }
     }
