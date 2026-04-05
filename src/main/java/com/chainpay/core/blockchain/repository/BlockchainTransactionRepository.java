@@ -10,7 +10,7 @@ import java.util.UUID;
 public interface BlockchainTransactionRepository extends JpaRepository<BlockchainTransaction, UUID> {
     Optional<BlockchainTransaction> findByTxHash(String txHash);
     Optional<BlockchainTransaction> findByPayoutId(UUID payoutId);
-    List<BlockchainTransaction> findByStatus(String status);
+    List<BlockchainTransaction> findByStatus(com.chainpay.core.blockchain.domain.BlockchainTxStatus status);
 
     @org.springframework.data.jpa.repository.Query("SELECT MAX(t.nonce) FROM BlockchainTransaction t WHERE t.fromAddress = :fromAddress")
     Optional<Long> findMaxNonceByFromAddress(@org.springframework.data.repository.query.Param("fromAddress") String fromAddress);

@@ -52,6 +52,12 @@ public class BlockchainTransaction {
     @Column(name = "on_chain_memo", length = 255)
     private String onChainMemo;
 
+    @Column(name = "calldata", columnDefinition = "TEXT")
+    private String calldata;
+
+    @Column(name = "value_sent_wei", precision = 38, scale = 0)
+    private BigInteger valueSentWei;
+
     @Column(name = "block_number")
     private Long blockNumber;
 
@@ -59,9 +65,10 @@ public class BlockchainTransaction {
     @Builder.Default
     private Integer confirmations = 0;
 
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 32)
     @Builder.Default
-    private String status = "PENDING";
+    private BlockchainTxStatus status = BlockchainTxStatus.PENDING;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     @Builder.Default
