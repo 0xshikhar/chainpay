@@ -1,6 +1,7 @@
 package com.chainpay.core.reconciliation.service;
 
 import com.chainpay.core.blockchain.domain.BlockchainTransaction;
+import com.chainpay.core.blockchain.domain.BlockchainTxStatus;
 import com.chainpay.core.blockchain.repository.BlockchainTransactionRepository;
 import com.chainpay.core.ledger.api.dto.JournalEntryRequest;
 import com.chainpay.core.ledger.api.dto.PostTransactionRequest;
@@ -38,7 +39,7 @@ public class ReorgService {
             return;
         }
 
-        tx.setStatus("REORG_ORPHANED");
+        tx.setStatus(BlockchainTxStatus.REORG_ORPHANED);
         blockchainTxRepository.save(tx);
 
         Payout payout = tx.getPayout();
