@@ -16,4 +16,7 @@ public interface JournalEntryRepository extends JpaRepository<JournalEntry, UUID
     @Query("SELECT COALESCE(SUM(CASE WHEN j.entryType = 'CREDIT' THEN j.amount ELSE -j.amount END), 0) " +
            "FROM JournalEntry j WHERE j.account.id = :accountId")
     BigInteger calculateRunningBalance(@Param("accountId") UUID accountId);
+
+    @Query("SELECT COALESCE(SUM(CASE WHEN j.entryType = 'CREDIT' THEN j.amount ELSE -j.amount END), 0) FROM JournalEntry j")
+    BigInteger calculateGlobalZeroSumImbalance();
 }
