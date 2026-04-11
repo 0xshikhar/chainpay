@@ -25,7 +25,7 @@ class GasManagementServiceTest {
 
     @BeforeEach
     void setUp() {
-        gasManagementService = new GasManagementService(transactionRepository, web3j);
+        gasManagementService = new GasManagementService(transactionRepository, web3j, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     }
 
     @Test

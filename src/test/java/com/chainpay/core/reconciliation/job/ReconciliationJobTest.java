@@ -1,16 +1,15 @@
 package com.chainpay.core.reconciliation.job;
 
-import com.chainpay.core.blockchain.domain.BlockchainTransaction;
 import com.chainpay.core.blockchain.repository.BlockchainTransactionRepository;
 import com.chainpay.core.payout.domain.Payout;
 import com.chainpay.core.payout.domain.PayoutStatus;
 import com.chainpay.core.payout.repository.PayoutRepository;
 import com.chainpay.core.reconciliation.domain.ReconciliationReport;
 import com.chainpay.core.reconciliation.repository.ReconciliationReportRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -43,8 +42,20 @@ class ReconciliationJobTest {
     @Mock
     private org.web3j.protocol.Web3j web3j;
 
-    @InjectMocks
     private ReconciliationJob reconciliationJob;
+
+    @BeforeEach
+    void setUp() {
+        reconciliationJob = new ReconciliationJob(
+                payoutRepository,
+                blockchainTransactionRepository,
+                reportRepository,
+                accountRepository,
+                ledgerService,
+                web3j,
+                "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        );
+    }
 
     @Test
     @DisplayName("Reconciliation job should flag missing blockchain transaction as discrepancy")
