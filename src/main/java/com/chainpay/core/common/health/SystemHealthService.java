@@ -1,5 +1,6 @@
 package com.chainpay.core.common.health;
 
+import com.chainpay.core.ledger.repository.JournalEntryRepository;
 import com.chainpay.core.ledger.repository.LedgerTransactionRepository;
 import lombok.Builder;
 import lombok.Data;
@@ -16,6 +17,7 @@ import java.math.BigInteger;
 public class SystemHealthService {
 
     private final LedgerTransactionRepository transactionRepository;
+    private final JournalEntryRepository journalEntryRepository;
     private final Web3j web3j;
 
     @Data
@@ -33,8 +35,13 @@ public class SystemHealthService {
         String ledgerStatus = "ZERO_SUM_INVARIANT_VALIDATED";
         try {
             txCount = transactionRepository.count();
+            BigInteger globalImbalance = journalEntryRepository.calculateGlobalZeroSumImbalance();
+            if (globalImbalance != null && !globalImbalance.equals(BigInteger.ZERO)) {
+                log.error("[HEALTH] Zero-sum ledger invariant broken! Global discrepancy delta: {}", globalImbalance);
+                ledgerStatus = "INVARIANT_BROKEN_DELTA_" + globalImbalance;
+            }
         } catch (Exception ex) {
-            log.error("Ledger health check failed: {}", ex.getMessage());
+            log.error("[HEALTH] Ledger health check failed: {}", ex.getMessage());
             ledgerStatus = "DATABASE_UNAVAILABLE";
         }
 
@@ -43,7 +50,7 @@ public class SystemHealthService {
         try {
             blockNumber = web3j.ethBlockNumber().send().getBlockNumber();
         } catch (Exception ex) {
-            log.warn("EVM node health check warning: {}", ex.getMessage());
+            log.warn("[HEALTH] EVM node health check warning: {}", ex.getMessage());
             evmStatus = "RPC_OFFLINE_DEV_FALLBACK";
         }
 
