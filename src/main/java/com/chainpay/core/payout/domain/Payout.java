@@ -25,11 +25,11 @@ public class Payout {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
     @JoinColumn(name = "account_id", nullable = false)
     private Account account;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
     @JoinColumn(name = "asset_id", nullable = false)
     private Asset asset;
 
@@ -57,7 +57,7 @@ public class Payout {
     @Column(name = "error_reason", columnDefinition = "TEXT")
     private String errorReason;
 
-    @OneToMany(mappedBy = "payout", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OneToMany(mappedBy = "payout", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     @Builder.Default
     private List<PayoutStatusHistory> statusHistory = new ArrayList<>();
 
