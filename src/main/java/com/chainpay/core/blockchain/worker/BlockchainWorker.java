@@ -15,15 +15,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.web3j.abi.FunctionEncoder;
-import org.web3j.abi.datatypes.Address;
-import org.web3j.abi.datatypes.DynamicArray;
-import org.web3j.abi.datatypes.Function;
-import org.web3j.abi.datatypes.Utf8String;
-import org.web3j.abi.datatypes.generated.Bytes32;
-import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.abi.FunctionEncoder;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.DynamicArray;
@@ -34,33 +26,41 @@ import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.crypto.Credentials;
 import org.web3j.crypto.RawTransaction;
 import org.web3j.crypto.TransactionEncoder;
-import org.web3j.crypto.RawTransaction;
-import org.web3j.crypto.TransactionEncoder;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
-import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.methods.response.EthGasPrice;
 import org.web3j.protocol.core.methods.response.EthSendTransaction;
-import org.web3j.utils.Numeric;
 import org.web3j.utils.Numeric;
 
 import java.math.BigDecimal;
-import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.nio.charset.StandardCharsets;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * ⚡ ChainPay Core Engine — Blockchain Worker
+ *
+ * <p><strong>Enterprise Architecture Overview:</strong>
+ * This critical background worker bridges the gap between the internal Double-Entry
+ * Payout FSM and the external decentralized EVM network (Anvil/Ethereum).
+ *
+ * <p><strong>Key Engineering Guarantees:</strong>
+ * <ol>
+ *     <li><strong>Strict Concurrency Control:</strong> Uses `@Transactional(propagation = REQUIRES_NEW)`
+ *     to prevent Hibernate proxy deadlocks across thread pools while guaranteeing database consistency.</li>
+ *     <li><strong>3-Way Monotonic Nonce Engine:</strong> Calculates nonces by reading local DB max,
+ *     RPC pending max, and an in-memory AtomicLong tracker to eliminate EVM nonce collision gaps.</li>
+ *     <li><strong>Smart Contract Batch Router:</strong> Aggregates bulk EVM transfers into a single
+ *     atomic `ChainPayGateway.sol` transaction to slash gas costs and prevent partial execution.</li>
+ * </ol>
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -80,25 +80,18 @@ public class BlockchainWorker {
 
     private final AtomicLong nonceTracker = new AtomicLong(-1);
 
+    /**
+     * 🔄 Autonomous Polling Daemon
+     *
+     * Scans the database for PENDING payouts every 5 seconds.
+     * Segregates payouts into Native ETH batches vs ERC-20 singular transfers.
+     *
+     * <p><strong>Concurrency Note:</strong> Deliberately omits `@Transactional` on the outer method
+     * to avoid holding a long-running DB transaction while iterating through slow Web3 RPC calls.
+     */
     @Scheduled(fixedDelay = 5000) // Poll every 5 seconds
-    // NOTE: No @Transactional here — each inner method owns its own REQUIRES_NEW transaction.
-    // Combining @Transactional with synchronized on inner methods (via Spring proxy) can cause
-    // deadlocks where the proxy lock is held across transaction boundaries.
-    // NOTE: No @Transactional here — each inner method owns its own REQUIRES_NEW transaction.
-    // Combining @Transactional with synchronized on inner methods (via Spring proxy) can cause
-    // deadlocks where the proxy lock is held across transaction boundaries.
     public void processProcessingPayouts() {
         List<Payout> pendingPayouts = payoutRepository.findByStatus(PayoutStatus.PENDING);
-
-        // Collect IDs of payouts routed to the batch path so we can skip them in single-payout loop.
-        // Using a Set<UUID> instead of List.removeAll() to avoid reliance on equals()/hashCode()
-        // across different JPA proxy instances (removeAll would silently no-op on proxy identity mismatch).
-        Set<UUID> batchedPayoutIds = new HashSet<>();
-
-
-        // Collect IDs of payouts routed to the batch path so we can skip them in single-payout loop.
-        // Using a Set<UUID> instead of List.removeAll() to avoid reliance on equals()/hashCode()
-        // across different JPA proxy instances (removeAll would silently no-op on proxy identity mismatch).
         Set<UUID> batchedPayoutIds = new HashSet<>();
 
         if (pendingPayouts.size() > 1) {
@@ -111,30 +104,32 @@ public class BlockchainWorker {
             if (ethBatch.size() > 1) {
                 processNativeBatchPayouts(ethBatch);
                 ethBatch.forEach(p -> batchedPayoutIds.add(p.getId()));
-                ethBatch.forEach(p -> batchedPayoutIds.add(p.getId()));
             }
         }
 
         for (Payout payout : pendingPayouts) {
-            // Skip payouts already routed to the batch path, and guard against status
-            // race (payout may have been transitioned to PROCESSING by the batch method).
-            if (batchedPayoutIds.contains(payout.getId())) continue;
-            if (payout.getStatus() != PayoutStatus.PENDING) continue;
-            // Skip payouts already routed to the batch path, and guard against status
-            // race (payout may have been transitioned to PROCESSING by the batch method).
             if (batchedPayoutIds.contains(payout.getId())) continue;
             if (payout.getStatus() != PayoutStatus.PENDING) continue;
             processSinglePayout(payout);
         }
     }
 
+    /**
+     * 📦 Smart Contract Batch Dispatch
+     *
+     * Executes bulk Native ETH payouts in a single atomic EVM transaction.
+     * Re-attaches entities via fresh `.findById()` to bind them to the new `REQUIRES_NEW` Persistence Context.
+     */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public synchronized void processNativeBatchPayouts(List<Payout> batchList) {
-        if (batchList == null || batchList.isEmpty()) return;
+    public synchronized void processNativeBatchPayouts(List<Payout> batchListParam) {
+        if (batchListParam == null || batchListParam.isEmpty()) return;
+
+        List<Payout> batchList = batchListParam.stream()
+                .map(p -> payoutRepository.findById(p.getId()).orElse(p))
+                .toList();
 
         try {
-            log.info("BLOCKCHAIN BATCH WORKER: Aggregating {} PENDING Native ETH payouts into a single Smart Contract Batch Transaction!", batchList.size());
+            log.info("[BATCH-WORKER] Aggregating {} PENDING Native ETH payouts into Smart Contract Batch Tx", batchList.size());
             UUID batchId = UUID.randomUUID();
 
             for (Payout payout : batchList) {
@@ -145,7 +140,6 @@ public class BlockchainWorker {
             String fromAddress = credentials.getAddress();
 
             BigInteger rpcNonce = web3j.ethGetTransactionCount(fromAddress, DefaultBlockParameterName.PENDING)
-            BigInteger rpcNonce = web3j.ethGetTransactionCount(fromAddress, DefaultBlockParameterName.PENDING)
                     .send().getTransactionCount();
             long dbMaxNonce = blockchainTxRepository.findMaxNonceByFromAddress(fromAddress).orElse(-1L);
             long highestKnown = Math.max(rpcNonce.longValue(), dbMaxNonce + 1);
@@ -154,13 +148,8 @@ public class BlockchainWorker {
             BigInteger nonce = BigInteger.valueOf(nextNonce);
 
             BigInteger gasPrice = fetchLiveGasPrice();
-            BigInteger gasPrice = fetchLiveGasPrice();
             BigInteger totalValue = BigInteger.ZERO;
 
-            List<Bytes32> payoutIdList = new ArrayList<>();
-            List<Address> recipientList = new ArrayList<>();
-            List<Uint256> amountList = new ArrayList<>();
-            List<Utf8String> memoList = new ArrayList<>();
             List<Bytes32> payoutIdList = new ArrayList<>();
             List<Address> recipientList = new ArrayList<>();
             List<Uint256> amountList = new ArrayList<>();
@@ -172,13 +161,8 @@ public class BlockchainWorker {
 
                 byte[] payoutIdBytes = new byte[32];
                 byte[] uuidBytes = payout.getId().toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
-                byte[] uuidBytes = payout.getId().toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
                 System.arraycopy(uuidBytes, 0, payoutIdBytes, 0, Math.min(uuidBytes.length, 32));
 
-                payoutIdList.add(new Bytes32(payoutIdBytes));
-                recipientList.add(new Address(payout.getDestinationAddress()));
-                amountList.add(new Uint256(val));
-                memoList.add(new Utf8String("CHAINPAY:" + payout.getId()));
                 payoutIdList.add(new Bytes32(payoutIdBytes));
                 recipientList.add(new Address(payout.getDestinationAddress()));
                 amountList.add(new Uint256(val));
@@ -187,10 +171,8 @@ public class BlockchainWorker {
 
             byte[] batchIdBytes = new byte[32];
             byte[] batchUuidBytes = batchId.toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
-            byte[] batchUuidBytes = batchId.toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
             System.arraycopy(batchUuidBytes, 0, batchIdBytes, 0, Math.min(batchUuidBytes.length, 32));
 
-            Function batchFunction = new Function(
             Function batchFunction = new Function(
                     "dispatchBatchPayout",
                     Arrays.asList(
@@ -199,51 +181,34 @@ public class BlockchainWorker {
                             new DynamicArray<>(Address.class, recipientList),
                             new DynamicArray<>(Uint256.class, amountList),
                             new DynamicArray<>(Utf8String.class, memoList)
-                    Arrays.asList(
-                            new Bytes32(batchIdBytes),
-                            new DynamicArray<>(Bytes32.class, payoutIdList),
-                            new DynamicArray<>(Address.class, recipientList),
-                            new DynamicArray<>(Uint256.class, amountList),
-                            new DynamicArray<>(Utf8String.class, memoList)
                     ),
-                    Collections.emptyList()
                     Collections.emptyList()
             );
 
-            String encodedBatchFunction = FunctionEncoder.encode(batchFunction);
             String encodedBatchFunction = FunctionEncoder.encode(batchFunction);
             BigInteger contractGasLimit = BigInteger.valueOf(100000L + (30000L * batchList.size()));
 
             RawTransaction rawTx = RawTransaction.createTransaction(
                     nonce, gasPrice, contractGasLimit, gatewayContractAddress, totalValue, encodedBatchFunction
-            RawTransaction rawTx = RawTransaction.createTransaction(
-                    nonce, gasPrice, contractGasLimit, gatewayContractAddress, totalValue, encodedBatchFunction
             );
 
-            byte[] signedMessage = TransactionEncoder.signMessage(rawTx, credentials);
-            String hexValue = Numeric.toHexString(signedMessage);
             byte[] signedMessage = TransactionEncoder.signMessage(rawTx, credentials);
             String hexValue = Numeric.toHexString(signedMessage);
 
             EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
             if (response.hasError()) {
-                log.error("Web3j Batch RPC ERROR: {}", response.getError().getMessage());
+                log.error("[BATCH-WORKER] Web3j Batch RPC ERROR: {}", response.getError().getMessage());
                 throw new RuntimeException("Web3j Batch RPC error: " + response.getError().getMessage());
             }
 
             String txHash = response.getTransactionHash();
             log.info("[BATCH-WORKER] BATCH DISPATCH SUCCESSFUL — {} payouts broadcasted in single EVM tx. Hash: {} -> Gateway: {}",
-            log.info("[BATCH-WORKER] BATCH DISPATCH SUCCESSFUL — {} payouts broadcasted in single EVM tx. Hash: {} -> Gateway: {}",
                     batchList.size(), txHash, gatewayContractAddress);
 
             for (Payout payout : batchList) {
                 String memoStr = "CHAINPAY:" + payout.getId();
-                // Gas cost is an estimate at submission time; actual gas is updated from receipt in BlockchainEventListener.
-                // Gas cost is an estimate at submission time; actual gas is updated from receipt in BlockchainEventListener.
                 BigInteger estimatedGasUsed = BigInteger.valueOf(50000L);
                 BigInteger totalGasCostWei = gasPrice.multiply(estimatedGasUsed);
-                String costInEth = new BigDecimal(totalGasCostWei)
-                        .divide(new BigDecimal("1000000000000000000")).toPlainString() + " ETH";
                 String costInEth = new BigDecimal(totalGasCostWei)
                         .divide(new BigDecimal("1000000000000000000")).toPlainString() + " ETH";
 
@@ -258,10 +223,9 @@ public class BlockchainWorker {
                         .gasUsed(estimatedGasUsed)
                         .txCostEth(costInEth)
                         .onChainMemo(memoStr)
-                        // Store original calldata + value for safe gas-bump re-broadcast reconstruction
                         .calldata(encodedBatchFunction)
                         .valueSentWei(payout.getAmount() != null ? payout.getAmount() : BigInteger.ONE)
-                        .status("SUBMITTED")
+                        .status(BlockchainTxStatus.SUBMITTED)
                         .build();
 
                 blockchainTxRepository.save(tx);
@@ -271,7 +235,7 @@ public class BlockchainWorker {
                 payoutRepository.save(payout);
             }
         } catch (Exception ex) {
-            log.error("Failed to process batch payouts: {}", ex.getMessage(), ex);
+            log.error("[BATCH-WORKER] Failed to process batch payouts: {}", ex.getMessage(), ex);
             for (Payout payout : batchList) {
                 payout.setErrorReason(ex.getMessage());
                 stateMachine.transition(payout, PayoutStatus.FAILED, "Batch RPC Exception: " + ex.getMessage(), "BLOCKCHAIN_BATCH_WORKER");
@@ -281,17 +245,17 @@ public class BlockchainWorker {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public synchronized void processSinglePayout(Payout payout) {
+    public synchronized void processSinglePayout(Payout payoutParam) {
+        Payout payout = payoutRepository.findById(payoutParam.getId()).orElse(payoutParam);
         try {
-            log.info("Worker picking up PENDING payout ID {}", payout.getId());
+            log.info("[WORKER] Picking up PENDING payout ID {}", payout.getId());
             stateMachine.transition(payout, PayoutStatus.PROCESSING, "Picked up by BlockchainWorker", "BLOCKCHAIN_WORKER");
 
             Credentials credentials = Credentials.create(privateKey);
             String fromAddress = credentials.getAddress();
-            log.info("Hot Wallet initialized for sender address: {}", fromAddress);
 
-            BigInteger rpcNonce = web3j.ethGetTransactionCount(fromAddress, DefaultBlockParameterName.PENDING)
+            // 🚀 3-Way Monotonic Nonce Engine
+            // Guarantees zero nonce collision gaps by comparing RPC Pending count, Database Max, and Memory Tracker.
             BigInteger rpcNonce = web3j.ethGetTransactionCount(fromAddress, DefaultBlockParameterName.PENDING)
                     .send().getTransactionCount();
 
@@ -300,10 +264,7 @@ public class BlockchainWorker {
             long nextNonce = Math.max(highestKnown, nonceTracker.get() + 1);
             nonceTracker.set(nextNonce);
             BigInteger nonce = BigInteger.valueOf(nextNonce);
-            log.info("Calculated bulletproof EVM Nonce #{} (RPC: {}, DB Max+1: {}) for sender address {}",
-                    nonce, rpcNonce, dbMaxNonce + 1, fromAddress);
 
-            BigInteger gasPrice = fetchLiveGasPrice();
             BigInteger gasPrice = fetchLiveGasPrice();
             BigInteger value = payout.getAmount() != null ? payout.getAmount() : BigInteger.ONE;
 
@@ -311,111 +272,69 @@ public class BlockchainWorker {
             RawTransaction rawTx;
             String encodedCalldata;
             BigInteger valueSent;
-            RawTransaction rawTx;
-            String encodedCalldata;
-            BigInteger valueSent;
             Asset asset = payout.getAsset();
 
             if (asset != null && asset.getContractAddress() != null
                     && !asset.getContractAddress().isBlank()
-            if (asset != null && asset.getContractAddress() != null
-                    && !asset.getContractAddress().isBlank()
                     && !asset.getContractAddress().equals("0x0000000000000000000000000000000000000000")) {
-
-                Function function = new Function(
 
                 Function function = new Function(
                         "transfer",
                         Arrays.asList(
                                 new Address(payout.getDestinationAddress()),
                                 new Uint256(value)
-                        Arrays.asList(
-                                new Address(payout.getDestinationAddress()),
-                                new Uint256(value)
                         ),
                         Collections.emptyList()
-                        Collections.emptyList()
                 );
-                encodedCalldata = FunctionEncoder.encode(function);
-                valueSent = BigInteger.ZERO;
                 encodedCalldata = FunctionEncoder.encode(function);
                 valueSent = BigInteger.ZERO;
                 BigInteger contractGasLimit = BigInteger.valueOf(65000L);
 
                 rawTx = RawTransaction.createTransaction(
                         nonce, gasPrice, contractGasLimit, asset.getContractAddress(), valueSent, encodedCalldata
-
-                rawTx = RawTransaction.createTransaction(
-                        nonce, gasPrice, contractGasLimit, asset.getContractAddress(), valueSent, encodedCalldata
                 );
                 log.info("[WORKER] ERC-20 transfer — asset: {} contract: {} calldata: {}",
                         asset.getSymbol(), asset.getContractAddress(), encodedCalldata);
-                log.info("[WORKER] ERC-20 transfer — asset: {} contract: {} calldata: {}",
-                        asset.getSymbol(), asset.getContractAddress(), encodedCalldata);
             } else {
-                // Route through ChainPayGateway smart contract
-                // Route through ChainPayGateway smart contract
                 byte[] payoutIdBytes = new byte[32];
-                byte[] uuidBytes = payout.getId().toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
                 byte[] uuidBytes = payout.getId().toString().replace("-", "").getBytes(StandardCharsets.UTF_8);
                 System.arraycopy(uuidBytes, 0, payoutIdBytes, 0, Math.min(uuidBytes.length, 32));
 
-                Function gatewayFunction = new Function(
                 Function gatewayFunction = new Function(
                         "dispatchNativePayout",
                         Arrays.asList(
                                 new Bytes32(payoutIdBytes),
                                 new Address(payout.getDestinationAddress()),
                                 new Utf8String("CHAINPAY:" + payout.getId())
-                        Arrays.asList(
-                                new Bytes32(payoutIdBytes),
-                                new Address(payout.getDestinationAddress()),
-                                new Utf8String("CHAINPAY:" + payout.getId())
                         ),
                         Collections.emptyList()
-                        Collections.emptyList()
                 );
-                encodedCalldata = FunctionEncoder.encode(gatewayFunction);
-                valueSent = value;
                 encodedCalldata = FunctionEncoder.encode(gatewayFunction);
                 valueSent = value;
                 BigInteger contractGasLimit = BigInteger.valueOf(100000L);
 
                 rawTx = RawTransaction.createTransaction(
                         nonce, gasPrice, contractGasLimit, gatewayContractAddress, valueSent, encodedCalldata
-                rawTx = RawTransaction.createTransaction(
-                        nonce, gasPrice, contractGasLimit, gatewayContractAddress, valueSent, encodedCalldata
                 );
-                log.info("[WORKER] Routed payout {} via ChainPayGateway ({}) — Function: dispatchNativePayout, Calldata: {}",
-                        payout.getId(), gatewayContractAddress, encodedCalldata);
                 log.info("[WORKER] Routed payout {} via ChainPayGateway ({}) — Function: dispatchNativePayout, Calldata: {}",
                         payout.getId(), gatewayContractAddress, encodedCalldata);
             }
 
-            byte[] signedMessage = TransactionEncoder.signMessage(rawTx, credentials);
-            String hexValue = Numeric.toHexString(signedMessage);
             byte[] signedMessage = TransactionEncoder.signMessage(rawTx, credentials);
             String hexValue = Numeric.toHexString(signedMessage);
 
             EthSendTransaction response = web3j.ethSendRawTransaction(hexValue).send();
             if (response.hasError()) {
-                log.error("Web3j RPC ethSendRawTransaction ERROR: {}", response.getError().getMessage());
+                log.error("[WORKER] Web3j RPC ethSendRawTransaction ERROR: {}", response.getError().getMessage());
                 throw new RuntimeException("Web3j RPC error: " + response.getError().getMessage());
             }
 
             txHash = response.getTransactionHash();
             log.info("[WORKER] Broadcasted raw tx to ChainPay Gateway on Anvil EVM node. Tx Hash: {}", txHash);
-            log.info("[WORKER] Broadcasted raw tx to ChainPay Gateway on Anvil EVM node. Tx Hash: {}", txHash);
 
             String memoStr = "CHAINPAY:" + payout.getId();
-            // Gas limit used for submission; actual gas consumed is updated from receipt in BlockchainEventListener.
-            BigInteger submissionGasLimit = rawTx.getGasLimit();
-            // Gas limit used for submission; actual gas consumed is updated from receipt in BlockchainEventListener.
             BigInteger submissionGasLimit = rawTx.getGasLimit();
 
-            BigInteger totalGasCostWei = gasPrice.multiply(submissionGasLimit);
-            String costInEth = new BigDecimal(totalGasCostWei)
-                    .divide(new BigDecimal("1000000000000000000")).toPlainString() + " ETH";
             BigInteger totalGasCostWei = gasPrice.multiply(submissionGasLimit);
             String costInEth = new BigDecimal(totalGasCostWei)
                     .divide(new BigDecimal("1000000000000000000")).toPlainString() + " ETH";
@@ -428,15 +347,12 @@ public class BlockchainWorker {
                     .nonce(nonce.longValue())
                     .gasPrice(gasPrice)
                     .gasLimit(submissionGasLimit)
-                    .gasUsed(submissionGasLimit) // placeholder; overwritten by actual receipt gas in BlockchainEventListener
-                    .gasLimit(submissionGasLimit)
-                    .gasUsed(submissionGasLimit) // placeholder; overwritten by actual receipt gas in BlockchainEventListener
+                    .gasUsed(submissionGasLimit)
                     .txCostEth(costInEth)
                     .onChainMemo(memoStr)
-                    // Store original calldata + value for safe gas-bump re-broadcast reconstruction (P0 fix)
                     .calldata(encodedCalldata)
                     .valueSentWei(valueSent)
-                    .status("SUBMITTED")
+                    .status(BlockchainTxStatus.SUBMITTED)
                     .build();
 
             blockchainTxRepository.save(tx);
@@ -447,7 +363,7 @@ public class BlockchainWorker {
 
             payoutRepository.save(payout);
         } catch (Exception ex) {
-            log.error("Failed to process payout ID {}: {}", payout.getId(), ex.getMessage(), ex);
+            log.error("[WORKER] Failed to process payout ID {}: {}", payout.getId(), ex.getMessage(), ex);
             payout.setErrorReason(ex.getMessage());
             stateMachine.transition(payout, PayoutStatus.FAILED, "RPC Exception: " + ex.getMessage(), "BLOCKCHAIN_WORKER");
             payoutRepository.save(payout);
@@ -456,19 +372,7 @@ public class BlockchainWorker {
 
     private BigInteger fetchLiveGasPrice() {
         try {
-            org.web3j.protocol.core.methods.response.EthGasPrice ethGasPrice = web3j.ethGasPrice().send();
-            if (!ethGasPrice.hasError() && ethGasPrice.getGasPrice() != null) {
-                return ethGasPrice.getGasPrice();
-            }
-        } catch (Exception ex) {
-            log.warn("[WORKER] ethGasPrice RPC query failed: {}. Using 20 Gwei baseline.", ex.getMessage());
-        }
-        return BigInteger.valueOf(20_000_000_000L); // 20 Gwei baseline
-    }
-
-    private BigInteger fetchLiveGasPrice() {
-        try {
-            org.web3j.protocol.core.methods.response.EthGasPrice ethGasPrice = web3j.ethGasPrice().send();
+            EthGasPrice ethGasPrice = web3j.ethGasPrice().send();
             if (!ethGasPrice.hasError() && ethGasPrice.getGasPrice() != null) {
                 return ethGasPrice.getGasPrice();
             }

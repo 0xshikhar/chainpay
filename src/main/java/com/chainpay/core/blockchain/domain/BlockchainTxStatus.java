@@ -5,5 +5,6 @@ public enum BlockchainTxStatus {
     SUBMITTED,
     CONFIRMED,
     REVERTED,
+    REORG_ORPHANED,
     FAILED
 }
