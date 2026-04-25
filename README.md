@@ -1,6 +1,8 @@
+<div align="center">
+
 # ⚡ ChainPay
 
-> **Enterprise Web3 Payout Gateway, Double-Entry Settlement & Automated Reconciliation Engine**
+### Enterprise Web3 Payout Gateway, Double-Entry Settlement & Automated Reconciliation Engine
 
 [![Java](https://img.shields.io/badge/Java-21%20%2F%2025-orange.svg?style=flat-square&logo=openjdk)](https://www.oracle.com/java/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.4-brightgreen.svg?style=flat-square&logo=springboot)](https://spring.io/projects/spring-boot)
@@ -13,13 +15,15 @@
 
 An immutable, high-throughput financial payout gateway, double-entry accounting engine, and automated Web3 reconciliation system built for enterprise stablecoin settlement (USDC/USDT) and multi-chain payment rails.
 
-[Architecture Playbook](docs/architecture-and-testing-guide.md) • [Local Anvil Guide](docs/local-anvil-testing-guide.md) • [Technical Roadmap](docs/chainpay-core-technical-roadmap.md) • [Audit Log](docs/issues.md)
+[📖 Architecture Playbook](docs/architecture-and-testing-guide.md) • [🚀 Quick Start](#-quick-start--local-deployment) • [⚡ Verification Harness](scripts/run-demo.py) • [🧪 Concurrency Suite](#-concurrency-benchmark--testing-suite) • [🔐 API Reference](#-api-reference-matrix) • [📜 Technical Roadmap](docs/chainpay-core-technical-roadmap.md)
+
+</div>
 
 ---
 
-## 📌 Executive Summary & System Vision
+## 📌 Summary & System Vision
 
-**ChainPay Core** bridges the critical operational gap between traditional double-entry financial accounting and decentralized Ethereum Virtual Machine (EVM) blockchains.
+**ChainPay** bridges the critical operational gap between traditional double-entry financial accounting and decentralized Ethereum Virtual Machine (EVM) blockchains.
 
 In high-volume payment infrastructure, naive Web3 implementations treat blockchain settlements as isolated API calls wrapped around single-column balance updates (`UPDATE account SET balance = balance - amount`). Under concurrent workload conditions, this approach leads to catastrophic system failures:
 - **Race conditions & overdrafts:** Concurrent debit requests execute against stale cached balances.
@@ -28,7 +32,7 @@ In high-volume payment infrastructure, naive Web3 implementations treat blockcha
 - **Smart contract re-entrancy:** Unprotected fallback calls allow malicious contract recipients to drain funds.
 - **State divergence on chain re-orgs:** Local database records mark payouts as completed even when on-chain blocks are orphaned.
 
-**ChainPay Core eliminates these failure modes** by pairing an immutable double-entry ledger with an idempotent Payout Finite State Machine (FSM), a 3-way monotonic nonce engine, dynamic EIP-1559 gas price scaling, transactional outbox webhooks, and automated 3-way balance reconciliation.
+**ChainPay eliminates these failure modes** by pairing an immutable double-entry ledger with an idempotent Payout Finite State Machine (FSM), a 3-way monotonic nonce engine, dynamic EIP-1559 gas price scaling, transactional outbox webhooks, and automated 3-way balance reconciliation.
 
 ---
 
@@ -44,11 +48,12 @@ In high-volume payment infrastructure, naive Web3 implementations treat blockcha
 8. [Transactional Outbox Pattern & Webhook Relay](#-transactional-outbox-pattern--webhook-relay)
 9. [Autonomous Anomaly Detection & AI Ops Telemetry](#-autonomous-anomaly-detection--ai-ops-telemetry)
 10. [Database Schema & Flyway Migrations](#-database-schema--flyway-migrations)
-11. [Behind-The-Scenes Verification Harness (`run-demo.py`)](#-behind-the-scenes-verification-harness-run-demopy)
-12. [Quick Start & Local Deployment](#-quick-start--local-deployment)
-13. [Concurrency Benchmark & Testing Suite](#-concurrency-benchmark--testing-suite)
-14. [API Reference Matrix](#-api-reference-matrix)
-15. [License](#-license)
+11. [Ecosystem & Technical Compatibility Matrix](#-ecosystem--technical-compatibility-matrix)
+12. [Behind-The-Scenes Verification Harness (`run-demo.py`)](#-behind-the-scenes-verification-harness-run-demopy)
+13. [Quick Start & Local Deployment](#-quick-start--local-deployment)
+14. [Concurrency Benchmark & Testing Suite](#-concurrency-benchmark--testing-suite)
+15. [API Reference Matrix](#-api-reference-matrix)
+16. [License](#-license)
 
 ---
 
@@ -107,7 +112,35 @@ flowchart TB
 
 ChainPay Core strictly prohibits single-column balance updates (`UPDATE account SET balance = ...`). Account balances are dynamically materialized from immutable journal entries.
 
-### 1. Mathematical Invariant Equations
+### 1. Double-Entry Journal Posting Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as API Client / Payout Service
+    participant Ledger as LedgerService
+    participant AccGuard as AccountStatusGuard
+    participant DB as PostgreSQL Database
+
+    Client->>Ledger: postJournalEntry(JournalEntryRequest)
+    Ledger->>AccGuard: validateActiveAccounts(debitAcc, creditAcc)
+    alt Any Account is SUSPENDED or FROZEN
+        AccGuard-->>Ledger: Throw DisabledAccountException
+        Ledger-->>Client: 400 Bad Request (Account Disabled)
+    else All Accounts Active
+        AccGuard-->>Ledger: Validation OK
+        Ledger->>Ledger: Verify sum(DEBITS) == sum(CREDITS) per Asset
+        alt Zero-Sum Invariant Fails
+            Ledger-->>Client: Throw UnbalancedJournalEntryException
+        else Zero-Sum Invariant Passes
+            Ledger->>DB: INSERT INTO journal_entries & journal_lines (Atomic)
+            DB-->>Ledger: Transaction Committed
+            Ledger-->>Client: JournalEntry Response (ZERO_SUM_VALIDATED)
+        end
+    end
+```
+
+### 2. Mathematical Invariant Equations
 Every transaction posted to ChainPay Core MUST satisfy the zero-sum invariant across every asset:
 
 $$\sum \text{DEBITS}_{\text{asset}} = \sum \text{CREDITS}_{\text{asset}}$$
@@ -116,17 +149,26 @@ Running account balances are materialized on-demand using immutable journal line
 
 $$\text{Account Balance} = \sum \text{CREDITS} - \sum \text{DEBITS}$$
 
-### 2. Multi-Asset Precision & Database Storage
+```text
+🔍  [BEHIND THE SCENES ENGINE ARCHITECTURE]
+    │ ChainPay never uses single-column UPDATE balance queries.
+    │ Account balances are dynamically materialized from immutable JournalEntry rows:
+    │   Running Balance = SUM(CREDIT entries) - SUM(DEBIT entries)
+    │ Zero-Sum Invariant: Every transaction enforces sum(DEBITS) == sum(CREDITS) per asset.
+    └────────────────────────────────────────────────────────────────────
+```
+
+### 3. Multi-Asset Precision & Database Storage
 All financial amounts are represented as `BigInteger` base units (wei for Native ETH, 6-decimal atomic units for ERC-20 USDC) and stored in PostgreSQL using `NUMERIC(38,0)` precision to eliminate floating-point rounding errors.
 
-### 3. System & Customer Account Types
+### 4. System & Customer Account Types
 - `CUSTOMER_AVAILABLE`: Merchant or customer available liquid funds.
 - `CUSTOMER_PENDING`: In-flight funds reserved during pending payout execution.
 - `SYSTEM_HOT_WALLET`: Internal double-entry tracking account for key-management hot wallet reserves.
 - `SYSTEM_GAS_FEE`: System expense account tracking cumulative EVM transaction gas fees.
 - `MERCHANT_REVENUE`: Revenue settlement account.
 
-### 4. Account Status Protection Guard
+### 5. Account Status Protection Guard
 The ledger enforces that transactions can only be posted to accounts in `AccountStatus.ACTIVE` state. Attempts to post to `SUSPENDED` or `FROZEN` accounts raise a `DisabledAccountException`, aborting the database transaction.
 
 ---
@@ -167,14 +209,52 @@ stateDiagram-v2
 
 ## ⚡ EVM Execution Engine & Monotonic Nonce Management
 
-### 1. 3-Way Monotonic Nonce Calculation Algorithm
+### 1. 3-Way Monotonic Nonce Engine Flow
+
+```mermaid
+flowchart LR
+    subgraph NonceEngine["3-Way Monotonic Nonce Calculation"]
+        RPC["1. web3j.ethGetTransactionCount\n(PENDING Pool)"]
+        DBNonce["2. db.findMaxNonceByFromAddress\n(Database Transaction Log)"]
+        AtomicTracker["3. nonceTracker.get()\n(In-Memory AtomicLong)"]
+    end
+
+    subgraph Selection["Monotonic Selector"]
+        MathMax["NextNonce = MAX(RPC, DB + 1, Memory + 1)"]
+    end
+
+    subgraph EVMBroadcast["Web3 Broadcaster"]
+        Sign["Sign secp256k1 Payload"]
+        Broadcast["web3j.ethSendRawTransaction()"]
+    end
+
+    RPC --> MathMax
+    DBNonce --> MathMax
+    AtomicTracker --> MathMax
+    MathMax --> AtomicTracker
+    MathMax --> Sign
+    Sign --> Broadcast
+```
+
+### 2. 3-Way Monotonic Nonce Calculation Algorithm
 To guarantee thread-safe execution across multi-threaded workers without mempool nonce collisions, the engine computes nonces using a 3-way evaluation formula:
 
 $$\text{NextNonce} = \max\left(\text{RPC Pending Count}, \text{DB Max Nonce} + 1, \text{Memory Nonce Tracker} + 1\right)$$
 
-This mechanism guarantees that even if Web3 RPC calls lag behind, nonces advance monotonically without gaps.
+```text
+🔍  [BEHIND THE SCENES ENGINE ARCHITECTURE]
+    │ Behind-The-Scenes Payout Initialization:
+    │   1. Idempotency-Key is persisted in Database Unique Index constraint.
+    │   2. Payout entity saved with status PENDING.
+    │   3. BlockchainWorker polls PENDING payouts, calculates 3-way monotonic nonce:
+    │      NextNonce = MAX(RPC Pending Count, DB Max Nonce + 1, Memory Tracker + 1)
+    │   4. Query live gas price from Web3j (web3j.ethGasPrice()).
+    │   5. Sign secp256k1 RawTransaction payload with Hot Wallet Private Key.
+    │   6. Broadcast raw hex string via web3j.ethSendRawTransaction() to Anvil node.
+    └────────────────────────────────────────────────────────────────────
+```
 
-### 2. Dynamic EIP-1559 Gas Bumping & Calldata Preservation
+### 3. Dynamic EIP-1559 Gas Bumping & Calldata Preservation
 When transactions remain stuck in the EVM mempool past the timeout threshold, `GasManagementService` executes a dynamic gas bump:
 
 $$\text{NewGasPrice} = \left\lceil 1.15 \times \text{CurrentGasPrice} \right\rceil$$
@@ -186,6 +266,16 @@ Unlike basic wallet implementations that lose contract call data during gas bump
 ## 📦 Smart Contract Architecture (`ChainPayGateway.sol`)
 
 The `ChainPayGateway.sol` smart contract serves as an enterprise router for bulk native ETH disbursements and ERC-20 transfers.
+
+```text
+🔍  [BEHIND THE SCENES ENGINE ARCHITECTURE]
+    │ Behind-The-Scenes Batch Smart Contract Execution:
+    │   1. Aggregates multiple payouts into a single transaction payload.
+    │   2. Encodes ABI calldata for ChainPayGateway.sol's dispatchBatchPayout method.
+    │   3. Executes transfers on-chain in a single atomic EVM transaction, saving gas fees.
+    │   4. Smart contract emits indexed PayoutDispatched(bytes32 indexed payoutId, address indexed merchant, ...) logs.
+    └────────────────────────────────────────────────────────────────────
+```
 
 ### Key Security & Architectural Principles
 1. **Re-entrancy Protection:** Inherits OpenZeppelin `ReentrancyGuard` applying `nonReentrant` modifiers on all public disbursement methods.
@@ -208,14 +298,29 @@ The `ChainPayGateway.sol` smart contract serves as an enterprise router for bulk
 
 ChainPay Core features an automated background reconciliation job (`ReconciliationJob`) that periodically executes a 3-way balance and transaction audit across three distinct layers:
 
+```mermaid
+flowchart TD
+    Start["ReconciliationJob Schedule (Hourly Scan)"] --> AuditDB["1. Query DB Payouts & BlockchainTransactions"]
+    AuditDB --> AuditLedger["2. Materialize Ledger Hot Wallet Balance\n(SUM DEBIT vs SUM CREDIT)"]
+    AuditLedger --> AuditEVM["3. Query Anvil RPC web3j.ethGetBalance(HotWallet)"]
+    
+    AuditEVM --> CheckInvariants{"Compare DB State vs Ledger vs EVM Balance"}
+    
+    CheckInvariants -->|No Discrepancy| Pass["Create ReconciliationReport (Status: PASSED)"]
+    CheckInvariants -->|Balance / Tx Mismatch| Fail["Create ReconciliationReport (Status: DISCREPANCY)\nRaise OperationalIncident"]
+    
+    Pass --> Persist["Persist Report to Database"]
+    Fail --> Persist
 ```
-┌─────────────────────────────────────────────────────────────┐
-│               3-Way Reconciliation Layer                    │
-│                                                             │
-│   Layer 1: Database Payout Records (FSM Status)            │
-│   Layer 2: Local Double-Entry Ledger (Journal Balance)     │
-│   Layer 3: Live EVM RPC Node State (ethGetBalance)          │
-└─────────────────────────────────────────────────────────────┘
+
+```text
+🔍  [BEHIND THE SCENES ENGINE ARCHITECTURE]
+    │ Behind-The-Scenes 3-Way Reconciliation Audit Flow:
+    │   1. Compares local Database Payout records against Database BlockchainTransaction records.
+    │   2. Queries Anvil RPC (web3j.ethGetBalance(hotWalletAddress)) to verify live on-chain ETH reserves.
+    │   3. Audits SYSTEM_HOT_WALLET double-entry ledger balance against live EVM node balance.
+    │   4. Persists an immutable ReconciliationReport entity to the database.
+    └────────────────────────────────────────────────────────────────────
 ```
 
 ### Realized Gas Cost Accounting
@@ -226,6 +331,18 @@ When `BlockchainEventListener` detects that an EVM transaction has been mined in
    - **DEBIT**: `SYSTEM_GAS_FEE` account.
    - **CREDIT**: `SYSTEM_HOT_WALLET` account.
 
+```text
+🔍  [BEHIND THE SCENES ENGINE ARCHITECTURE]
+    │ Behind-The-Scenes Confirmation Tracking:
+    │   1. Anvil EVM node mines transaction into block.
+    │   2. BlockchainEventListener background worker queries web3j.ethGetTransactionReceipt(txHash).
+    │   3. Verifies EVM status code (0x1 = SUCCESS, 0x0 = REVERT).
+    │   4. Calculates real block confirmations: RealConfirmations = CurrentBlock - MinedBlock + 1.
+    │   5. FSM transitions: PENDING -> PROCESSING -> SUBMITTED -> CONFIRMING -> COMPLETED.
+    │   6. Insert OutboxEvent record for transactional webhook broadcast.
+    └────────────────────────────────────────────────────────────────────
+```
+
 ---
 
 ## 📬 Transactional Outbox Pattern & Webhook Relay
@@ -235,6 +352,30 @@ To guarantee at-least-once webhook delivery to external merchant endpoints witho
 1. **Dual-Write Transaction:** When a payout state transitions (e.g., to `COMPLETED` or `FAILED`), an `OutboxEvent` entity is inserted within the *same* database transaction as the payout update.
 2. **Asynchronous Relay Worker:** `OutboxRelayJob` polls unhandled outbox records, constructs the JSON payload, generates an `HMAC-SHA256` signature header (`X-ChainPay-Signature`), and executes a real HTTP POST request.
 3. **Resilient Retry Handling:** If the target endpoint returns a non-2xx status code, the outbox entry retry counter increments with exponential backoff.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as BlockchainEventListener
+    participant DB as PostgreSQL DB (Atomic Transaction)
+    participant OutboxJob as OutboxRelayJob (Background Thread)
+    participant Endpoint as Merchant Webhook HTTP Endpoint
+
+    Worker->>DB: UPDATE payouts SET status = 'COMPLETED'
+    Worker->>DB: INSERT INTO outbox_events (PAYOUT_SUBMITTED payload)
+    DB-->>Worker: Commit Single Database Transaction
+    
+    loop Every 3 Seconds
+        OutboxJob->>DB: SELECT * FROM outbox_events WHERE status = 'PENDING'
+        OutboxJob->>OutboxJob: Sign Payload Header X-ChainPay-Signature (HMAC-SHA256)
+        OutboxJob->>Endpoint: HTTP POST /webhook (Payload + Signature)
+        alt Endpoint Returns 200 OK
+            OutboxJob->>DB: UPDATE outbox_events SET status = 'PROCESSED'
+        else Endpoint Fails / Times Out
+            OutboxJob->>DB: UPDATE outbox_events SET retry_count += 1 (Backoff)
+        end
+    end
+```
 
 ---
 
@@ -255,6 +396,20 @@ Database DDL migrations are managed version-by-version using **Flyway**:
 - `V1__init_schema.sql`: Core relational schemas for `accounts`, `assets`, `journal_entries`, `journal_lines`, `payouts`, `payout_status_history`, `blockchain_transactions`, and `outbox_events`.
 - `V2__add_reconciliation_reports.sql`: Audit table structures for 3-way reconciliation reporting.
 - `V3__add_blockchain_tx_calldata.sql`: Schema upgrade adding `calldata TEXT` and `value_sent_wei NUMERIC(38,0)` to `blockchain_transactions` for calldata-preserving gas bumps.
+
+---
+
+## 🌐 Ecosystem & Technical Compatibility Matrix
+
+| Subsystem Component | Supported Standard / Tech | Tested Version | Integration & Purpose |
+| :--- | :--- | :--- | :--- |
+| **Language Runtime** | Java OpenJDK | Java 21 LTS / 25 | Virtual Threads (Project Loom) & pattern matching |
+| **Framework Layer** | Spring Boot | 3.3.4 | `@Transactional` boundary, Security, Data JPA |
+| **Web3 EVM Client** | Web3j Client | 4.10.3 | Web3 RPC, secp256k1 signing, ABI FunctionEncoder |
+| **Relational Database**| PostgreSQL | 16.0+ | Flyway migrations, `NUMERIC(38,0)` ledger math |
+| **Distributed Caching**| Redis / Jedis | 7.2+ | Distributed locks, idempotency key TTL tracking |
+| **EVM Local Devnet** | Foundry Anvil | 0.2.0+ | Instant EVM block mining on `http://127.0.0.1:8545` |
+| **Smart Contracts** | Solidity / OpenZeppelin | 0.8.20 | `ChainPayGateway.sol` contract deployment via Forge |
 
 ---
 
