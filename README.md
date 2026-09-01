@@ -63,31 +63,31 @@ In high-volume payment infrastructure, naive Web3 implementations treat blockcha
 
 ```mermaid
 flowchart TB
-    subgraph Clients["Clients & External Integrations"]
+    subgraph Clients["Clients and Integrations"]
         Merchant["Merchant API Client"]
         Auditor["Compliance Auditor"]
         DemoHarness["run-demo.py Verification Harness"]
     end
 
-    subgraph CoreEngine["ChainPay Core Engine (Spring Boot 3.3.4 & Java 21/25)"]
-        Security["🔒 Security & JWT Auth Filter"]
-        PayoutFSM["⚙️ Payout Finite State Machine"]
-        Ledger["🏦 Double-Entry Ledger Engine"]
-        OutboxRelay["📬 Transactional Outbox Relay"]
-        Reconciliation["⚖️ 3-Way Reconciliation Job"]
-        GasService["⛽ Gas Management Service"]
-        Copilot["📊 AI Ops Telemetry"]
+    subgraph CoreEngine["ChainPay Core Engine"]
+        Security["Security and JWT Auth Filter"]
+        PayoutFSM["Payout Finite State Machine"]
+        Ledger["Double-Entry Ledger Engine"]
+        OutboxRelay["Transactional Outbox Relay"]
+        Reconciliation["3-Way Reconciliation Job"]
+        GasService["Gas Management Service"]
+        Copilot["AI Ops Telemetry"]
     end
 
-    subgraph Storage["Persistence & Storage Layer"]
-        DB[(PostgreSQL 16\nImmutable Journal Entries)]
-        Redis[(Redis 7\nIdempotency Keys & Locks)]
+    subgraph Storage["Persistence Layer"]
+        DB[("PostgreSQL 16 Database")]
+        Redis[("Redis 7 Cache and Locks")]
     end
 
     subgraph Web3EVM["Web3 EVM Infrastructure"]
-        Worker["⚡ Web3j Worker (3-Way Nonce Engine)"]
-        Anvil["Local EVM Devnet (Anvil :8545)"]
-        Gateway["📦 ChainPayGateway.sol\n(Smart Contract Router)"]
+        Worker["Web3j Worker - 3-Way Nonce Engine"]
+        Anvil["Local EVM Devnet - Anvil"]
+        Gateway["ChainPayGateway Smart Contract Router"]
     end
 
     Merchant -->|REST API / JWT| Security
@@ -99,10 +99,10 @@ flowchart TB
     Worker -->|eth_sendRawTransaction| Anvil
     Anvil -->|Executes Call| Gateway
     Gateway -->|Emits PayoutDispatched Event| Worker
-    Worker -->|Receipt Confirmation & Gas Settlement| PayoutFSM
+    Worker -->|Receipt Confirmation| PayoutFSM
     PayoutFSM -->|Publish Event| OutboxRelay
     OutboxRelay -->|Real HTTP Dispatch| DB
-    Reconciliation -->|ethGetBalance & Ledger Audit| Anvil
+    Reconciliation -->|ethGetBalance Audit| Anvil
     Reconciliation --> DB
 ```
 
@@ -214,9 +214,9 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     subgraph NonceEngine["3-Way Monotonic Nonce Calculation"]
-        RPC["1. web3j.ethGetTransactionCount\n(PENDING Pool)"]
-        DBNonce["2. db.findMaxNonceByFromAddress\n(Database Transaction Log)"]
-        AtomicTracker["3. nonceTracker.get()\n(In-Memory AtomicLong)"]
+        RPC["1. web3j.ethGetTransactionCount"]
+        DBNonce["2. db.findMaxNonceByFromAddress"]
+        AtomicTracker["3. nonceTracker.get"]
     end
 
     subgraph Selection["Monotonic Selector"]
@@ -225,7 +225,7 @@ flowchart LR
 
     subgraph EVMBroadcast["Web3 Broadcaster"]
         Sign["Sign secp256k1 Payload"]
-        Broadcast["web3j.ethSendRawTransaction()"]
+        Broadcast["web3j.ethSendRawTransaction"]
     end
 
     RPC --> MathMax
@@ -300,14 +300,14 @@ ChainPay Core features an automated background reconciliation job (`Reconciliati
 
 ```mermaid
 flowchart TD
-    Start["ReconciliationJob Schedule (Hourly Scan)"] --> AuditDB["1. Query DB Payouts & BlockchainTransactions"]
-    AuditDB --> AuditLedger["2. Materialize Ledger Hot Wallet Balance\n(SUM DEBIT vs SUM CREDIT)"]
-    AuditLedger --> AuditEVM["3. Query Anvil RPC web3j.ethGetBalance(HotWallet)"]
+    Start["ReconciliationJob Schedule"] --> AuditDB["1. Query DB Payouts and BlockchainTransactions"]
+    AuditDB --> AuditLedger["2. Materialize Ledger Hot Wallet Balance"]
+    AuditLedger --> AuditEVM["3. Query Anvil RPC ethGetBalance"]
     
     AuditEVM --> CheckInvariants{"Compare DB State vs Ledger vs EVM Balance"}
     
-    CheckInvariants -->|No Discrepancy| Pass["Create ReconciliationReport (Status: PASSED)"]
-    CheckInvariants -->|Balance / Tx Mismatch| Fail["Create ReconciliationReport (Status: DISCREPANCY)\nRaise OperationalIncident"]
+    CheckInvariants -->|No Discrepancy| Pass["Create ReconciliationReport - PASSED"]
+    CheckInvariants -->|Balance Mismatch| Fail["Create ReconciliationReport - DISCREPANCY"]
     
     Pass --> Persist["Persist Report to Database"]
     Fail --> Persist
@@ -383,8 +383,9 @@ sequenceDiagram
 
 ChainPay Core includes an automated anomaly detection daemon (`AnomalyDetectionService`) and AI Ops Telemetry system:
 
-- **Autonomous Scans:** Scans every 60 seconds for stuck in-flight payouts ($T > 15 \text{ mins}$ in `PROCESSING` or `SUBMITTED`), orphaned blockchain transactions, and ledger zero-sum imbalances.
-- **Incident Persistence:** Automatically creates `OperationalIncident` entities when system drift or anomalies are detected.
+- **Proactive Hot Wallet Gas Depletion Monitoring:** Every 60 seconds, `AnomalyDetectionService` queries `web3j.ethGetBalance(hotWalletAddress, LATEST)`. If the hot wallet native ETH balance drops below `0.05 ETH`, it proactively raises a `LOW_GAS_RESERVE` incident with `CRITICAL` severity before raw payouts hit EVM mempool rejection errors.
+- **Autonomous Scans:** Scans every 60 seconds for stuck in-flight payouts ($T > 15 \text{ mins}$ in `PROCESSING` or `SUBMITTED`), transactional outbox backlog saturation ($N \ge 50$), orphaned blockchain transactions, and ledger zero-sum imbalances.
+- **Incident Persistence:** Automatically creates `OperationalIncident` entities when system drift or low gas reserves are detected.
 - **REST Telemetry:** Exposes read-only operational telemetry at `/api/v1/copilot/summary` and `/api/v1/health` for monitoring and LLM diagnostic tools.
 
 ---
