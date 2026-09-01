@@ -153,10 +153,10 @@ When a transaction is stuck in the EVM mempool past the configured timeout thres
 ```mermaid
 flowchart LR
     StuckTx["Stuck Mempool Transaction"] --> GasService["GasManagementService Scan"]
-    GasService --> ReadCalldata["Read Original Calldata & Value\n(V3 Flyway Schema)"]
-    ReadCalldata --> ScaleGasPrice["Bump Gas Price: 1.15 * CurrentGasPrice"]
-    ScaleGasPrice --> ReSign["Re-Sign secp256k1 RawTransaction\n(Same Nonce + Bumped Gas + Same Calldata)"]
-    ReSign --> Broadcast["web3j.ethSendRawTransaction()"]
+    GasService --> ReadCalldata["Read Original Calldata and Value"]
+    ReadCalldata --> ScaleGasPrice["Bump Gas Price 1.15x"]
+    ScaleGasPrice --> ReSign["Re-Sign secp256k1 RawTransaction"]
+    ReSign --> Broadcast["web3j.ethSendRawTransaction"]
 ```
 
 1. **Stuck Transaction Detection**:
@@ -208,18 +208,53 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Start["ReconciliationJob Schedule (Hourly Scan)"] --> AuditDB["1. Query DB Payouts & BlockchainTransactions"]
-    AuditDB --> AuditLedger["2. Materialize Ledger Hot Wallet Balance\n(SUM DEBIT vs SUM CREDIT)"]
-    AuditLedger --> AuditEVM["3. Query Anvil RPC web3j.ethGetBalance(HotWallet)"]
+    Start["ReconciliationJob Schedule"] --> AuditDB["1. Query DB Payouts and BlockchainTransactions"]
+    AuditDB --> AuditLedger["2. Materialize Ledger Hot Wallet Balance"]
+    AuditLedger --> AuditEVM["3. Query Anvil RPC ethGetBalance"]
     
     AuditEVM --> CheckInvariants{"Compare DB State vs Ledger vs EVM Balance"}
     
-    CheckInvariants -->|No Discrepancy| Pass["Create ReconciliationReport (Status: PASSED)"]
-    CheckInvariants -->|Balance / Tx Mismatch| Fail["Create ReconciliationReport (Status: DISCREPANCY)\nRaise OperationalIncident"]
+    CheckInvariants -->|No Discrepancy| Pass["Create ReconciliationReport - PASSED"]
+    CheckInvariants -->|Balance Mismatch| Fail["Create ReconciliationReport - DISCREPANCY"]
     
     Pass --> Persist["Persist Report to Database"]
     Fail --> Persist
 ```
+
+---
+
+## 🛡 3. Advanced Technical Deep Dives & Architectural Edge Cases
+
+### 1. Chain Reorgs vs. Ledger Entries: How Reversals Work (`ReorgService.java`)
+**Core Question**: *When an EVM block re-org occurs and orphaned transactions revert, how does the double-entry ledger guarantee solvency?*
+
+- **Pre-Confirmation ($N < 12$)**: While a payout is in `PENDING`, `PROCESSING`, `SUBMITTED`, or `CONFIRMING` ($N < 12$ block confirmations), final double-entry settlement journal entries (`DEBIT CUSTOMER_AVAILABLE`, `CREDIT SYSTEM_HOT_WALLET`) are **not yet posted** to the double-entry database ledger. The in-flight reservation exists only on the `Payout` domain entity. If a re-org orphans the transaction before finality, `PayoutStateMachine` transitions the payout to `FAILED` / `FAILED_PERMANENTLY`, releasing the reservation without needing ledger reversals because no journal rows were committed.
+- **Post-Finality Reorg (Deep Reorg Handling)**: If a deep re-org occurs on a payout that reached `COMPLETED` state, `ReorgService.java` intercepts the orphaned transaction:
+  1. Marks `BlockchainTransaction` status as `REORG_ORPHANED`.
+  2. Constructs a **Compensating Journal Reversal** (`PostTransactionRequest` with `EntryType.CREDIT` back to `payout.getAccount().getId()`), executing a strict zero-sum ledger reversal (`sum(DEBITS) == sum(CREDITS)`).
+  3. Transitions `PayoutStatus` to `FAILED_PERMANENTLY` with reason `"Compensated due to Chain Reorg"`.
+  4. Preserves full audit history: journal entry rows are **never deleted**, maintaining an immutable audit log.
+
+---
+
+### 2. Proactive Hot Wallet Gas Depletion Prevention (`AnomalyDetectionService.java`)
+**Core Question**: *Is gas monitored reactively after payouts fail, or proactively before execution?*
+
+- **Proactive Monitoring**: `AnomalyDetectionService.java` executes an automated scan every 60 seconds with `MIN_HOT_WALLET_GAS_THRESHOLD = 0.05 ETH` (`50,000,000,000,000,000 wei`).
+- **Pre-Execution Alerting**: It queries `web3j.ethGetBalance(hotWalletAddress, LATEST)`. If reserves drop below `0.05 ETH`, it logs a warning and creates an `OperationalIncident` entity with category `LOW_GAS_RESERVE` and severity `CRITICAL`.
+- **System Defense**: Operator dashboards and telemetry endpoints (`/api/v1/copilot/summary`, `/api/v1/health`) immediately reflect the open incident, flagging gas depletion **proactively** before raw payout transactions fail in Web3 RPC execution.
+
+---
+
+### 3. Nonce Management & Horizontal Multi-Node Scaling (Architectural Tradeoffs)
+**Core Question**: *How does the nonce engine handle single hot wallet bottlenecks, and how does it scale horizontally?*
+
+- **Single Hot Wallet Implementation (Current)**: Monotonic nonces are calculated as:
+  $$\text{NextNonce} = \max\left(\text{RPC Pending Count}, \text{DB Max Nonce} + 1, \text{Memory Nonce Tracker} + 1\right)$$
+  This guarantees single-instance thread safety with zero nonce collision gaps.
+- **Horizontal Scaling Strategy (Known Tradeoff / Production Blueprint)**:
+  1. **Address Pool Sharding**: Maintain a pool of distinct KMS hot wallet keys (`HotWallet #1`, `HotWallet #2`, `HotWallet #3`). Payout batches are sharded across key addresses to eliminate nonce contention.
+  2. **Distributed Redis Nonce Queues**: Atomic `INCR` or Lua scripts in Redis 7 manage atomic monotonic nonce increments across multi-node Spring Boot clusters.
 
 ---
 

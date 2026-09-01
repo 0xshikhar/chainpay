@@ -10,28 +10,28 @@ When running locally, ChainPay operates with three primary interconnected compon
 
 ```mermaid
 flowchart LR
-    subgraph TestClients["Test Clients & Verification Suites"]
+    subgraph TestClients["Test Clients and Suites"]
         DemoScript["run-demo.py Harness"]
         CustomPython["Standalone test_flow.py"]
         CurlCLI["cURL REST Commands"]
     end
 
-    subgraph Backend["ChainPay Core Engine (Spring Boot 3.3.4 & Java 21/25)"]
-        JWT["🔒 JwtAuthenticationFilter"]
-        FSM["⚙️ Payout Finite State Machine"]
-        Ledger["🏦 Double-Entry Ledger Engine"]
-        Worker["⚡ BlockchainWorker & Nonce Engine"]
-        Reconcile["⚖️ 3-Way Reconciliation Job"]
+    subgraph Backend["ChainPay Core Engine"]
+        JWT["JwtAuthenticationFilter"]
+        FSM["Payout Finite State Machine"]
+        Ledger["Double-Entry Ledger Engine"]
+        Worker["BlockchainWorker and Nonce Engine"]
+        Reconcile["3-Way Reconciliation Job"]
     end
 
-    subgraph Storage["Database & Caching Layer"]
-        DB[(PostgreSQL 16 / In-Memory H2)]
-        Redis[(Redis 7 Distributed Lock)]
+    subgraph Storage["Database and Cache"]
+        DB[("PostgreSQL 16 Database")]
+        Redis[("Redis 7 Lock Manager")]
     end
 
     subgraph EVMNode["Local Blockchain Devnet"]
-        Anvil["Anvil EVM Node (http://127.0.0.1:8545)"]
-        Contract["📦 ChainPayGateway.sol (Smart Contract Router)"]
+        Anvil["Anvil EVM Devnet"]
+        Contract["ChainPayGateway Smart Contract"]
     end
 
     TestClients -->|HTTP REST / Bearer JWT| JWT
@@ -39,7 +39,7 @@ flowchart LR
     FSM --> Ledger
     Ledger --> DB
     FSM --> Worker
-    Worker -->|Web3j eth_sendRawTransaction| Anvil
+    Worker -->|eth_sendRawTransaction| Anvil
     Anvil -->|Executes Calldata| Contract
     Contract -->|Emits PayoutDispatched Event| Worker
     Reconcile -->|ethGetBalance Audit| Anvil
@@ -344,3 +344,20 @@ eth_sendRawTransaction
 ### 3. Seed Data UUID Mismatch Upon Server Restart
 - **Cause**: In-memory test databases re-generate entity UUIDs on fresh startup.
 - **Fix**: Run `python3 scripts/run-demo.py` directly, as it automatically queries seeded account and asset IDs dynamically before submitting payouts.
+
+### 4. `Web server failed to start. Port 8080 was already in use.` (or `HTTP 403 Forbidden` Error)
+- **Cause**: An old background Java process or another local server is already running on port `8080`. When `./gradlew bootRun` fails to start due to a port binding collision, `run-demo.py` hits the stale server on port 8080, causing `403 Forbidden` authentication rejections or seed state mismatches.
+- **Fix**:
+  1. **Identify the Process ID (PID) occupying port 8080**:
+     ```bash
+     lsof -i :8080
+     ```
+  2. **Kill the stale background process**:
+     ```bash
+     kill -9 $(lsof -t -i:8080)
+     ```
+  3. **Re-launch the backend server in test profile**:
+     ```bash
+     ./gradlew bootRun --args='--spring.profiles.active=test'
+     ```
+

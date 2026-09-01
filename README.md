@@ -518,6 +518,9 @@ ChainPay Core includes an interactive, 7-step verification harness ([scripts/run
    ./gradlew bootRun --args='--spring.profiles.active=test'
    ```
 
+   > [!NOTE]
+   > If port 8080 is occupied by an old background process, clear it first with: `kill -9 $(lsof -t -i:8080)`
+
 4. **Run End-to-End Verification Harness**:
    ```bash
    python3 scripts/run-demo.py
