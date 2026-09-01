@@ -2,7 +2,7 @@
 
 # ⚡ ChainPay
 
-### Enterprise Web3 Payout Gateway, Double-Entry Settlement & Automated Reconciliation Engine
+> **Zero-Drift Web3 Settlement. Double-Entry Invariants. Atomic EVM Payouts.**
 
 [![Java](https://img.shields.io/badge/Java-21%20%2F%2025-orange.svg?style=flat-square&logo=openjdk)](https://www.oracle.com/java/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.4-brightgreen.svg?style=flat-square&logo=springboot)](https://spring.io/projects/spring-boot)
@@ -13,7 +13,7 @@
 [![Foundry](https://img.shields.io/badge/EVM%20Devnet-Foundry%20Anvil-red.svg?style=flat-square)](https://github.com/foundry-rs/foundry)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 
-An immutable, high-throughput financial payout gateway, double-entry accounting engine, and automated Web3 reconciliation system built for enterprise stablecoin settlement (USDC/USDT) and multi-chain payment rails.
+*A high-throughput Web3 settlement engine combining immutable double-entry accounting, atomic EVM payouts, and automated on-chain reconciliation for stablecoin payment infrastructure.*
 
 [📖 Architecture Playbook](docs/architecture-and-testing-guide.md) • [🚀 Quick Start](#-quick-start--local-deployment) • [⚡ Verification Harness](scripts/run-demo.py) • [🧪 Concurrency Suite](#-concurrency-benchmark--testing-suite) • [🔐 API Reference](#-api-reference-matrix) • [📜 Technical Roadmap](docs/chainpay-core-technical-roadmap.md)
 

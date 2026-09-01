@@ -1,24 +1,54 @@
-# ChainPay Core — Local Anvil EVM Testnet End-to-End Execution Guide
+# ChainPay — Local Anvil EVM Testnet End-to-End Execution & Debugging Manual
 
-This document is the definitive operational manual for running, testing, and debugging **ChainPay Core** against a local **Anvil** Ethereum Virtual Machine (EVM) node on your local system without Docker or external cloud services.
+This document is the master operational manual for setting up, running, testing, and debugging **ChainPay** against a local **Anvil** Ethereum Virtual Machine (EVM) devnet node on your local machine without external cloud dependencies.
 
 ---
 
-## 📌 1. Architecture Overview
+## 📌 1. Complete Architecture Overview
 
 When running locally, ChainPay operates with three primary interconnected components:
 
 ```mermaid
 flowchart LR
-    A["Python / Curl Test Script"] -->|HTTP / REST API| B["ChainPay Core (Spring Boot)"]
-    B -->|DB JPA State| C["In-Memory Database (H2 / PostgreSQL Dialect)"]
-    B -->|Web3j JSON-RPC & raw tx| D["Anvil EVM Node (http://127.0.0.1:8545)"]
-    D -->|Executes Calldata| E["ChainPayGateway.sol (0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6)"]
+    subgraph TestClients["Test Clients & Verification Suites"]
+        DemoScript["run-demo.py Harness"]
+        CustomPython["Standalone test_flow.py"]
+        CurlCLI["cURL REST Commands"]
+    end
+
+    subgraph Backend["ChainPay Core Engine (Spring Boot 3.3.4 & Java 21/25)"]
+        JWT["🔒 JwtAuthenticationFilter"]
+        FSM["⚙️ Payout Finite State Machine"]
+        Ledger["🏦 Double-Entry Ledger Engine"]
+        Worker["⚡ BlockchainWorker & Nonce Engine"]
+        Reconcile["⚖️ 3-Way Reconciliation Job"]
+    end
+
+    subgraph Storage["Database & Caching Layer"]
+        DB[(PostgreSQL 16 / In-Memory H2)]
+        Redis[(Redis 7 Distributed Lock)]
+    end
+
+    subgraph EVMNode["Local Blockchain Devnet"]
+        Anvil["Anvil EVM Node (http://127.0.0.1:8545)"]
+        Contract["📦 ChainPayGateway.sol (Smart Contract Router)"]
+    end
+
+    TestClients -->|HTTP REST / Bearer JWT| JWT
+    JWT --> FSM
+    FSM --> Ledger
+    Ledger --> DB
+    FSM --> Worker
+    Worker -->|Web3j eth_sendRawTransaction| Anvil
+    Anvil -->|Executes Calldata| Contract
+    Contract -->|Emits PayoutDispatched Event| Worker
+    Reconcile -->|ethGetBalance Audit| Anvil
+    Reconcile --> DB
 ```
 
-1. **Anvil EVM Node (`http://127.0.0.1:8545`)**: Runs local blockchain, mines blocks, and executes Solidity smart contracts.
-2. **ChainPay Gateway Smart Contract (`ChainPayGateway.sol`)**: Deployed on Anvil, receives payout transfers, and emits indexed on-chain `PayoutDispatched` event logs.
-3. **ChainPay Engine (Java 21/25 Spring Boot)**: Handles JWT auth, double-entry ledger postings, Web3j secp256k1 signing, dynamic nonce management, and real EVM receipt confirmation tracking.
+1. **Anvil EVM Node (`http://127.0.0.1:8545`)**: Runs local blockchain state, mines blocks on-demand, and executes Solidity smart contracts.
+2. **ChainPay Gateway Smart Contract (`ChainPayGateway.sol`)**: Deployed on Anvil, receives single/batch payout transfers, enforces `ReentrancyGuard`, and emits indexed `PayoutDispatched` event logs.
+3. **ChainPay Engine (Java 21/25 Spring Boot)**: Handles JWT authentication, double-entry ledger postings, Web3j secp256k1 signing, 3-way monotonic nonce management, gas bumping, and real EVM receipt confirmation tracking.
 
 ---
 
@@ -27,10 +57,10 @@ flowchart LR
 Run these verification commands in your shell before starting:
 
 ```bash
-java -version       # Required: Java 21 or Java 25
-anvil --version      # Required: Foundry Anvil (1.5.1+)
+java -version       # Required: Java 21 LTS or Java 25
+anvil --version      # Required: Foundry Anvil CLI (1.5.1+)
 forge --version      # Required: Foundry Forge CLI
-python3 --version    # Required: Python 3.10+
+python3 --version    # Required: Python 3.9+
 ```
 
 ---
@@ -39,7 +69,7 @@ python3 --version    # Required: Python 3.10+
 
 ### Step 1: Start the Local Anvil EVM Node
 
-Open **Terminal 1** and run:
+Open **Terminal 1** and start Anvil:
 
 ```bash
 anvil
@@ -68,15 +98,14 @@ Private Keys
 Listening on 127.0.0.1:8545
 ```
 
-#### What NOT to Expect:
-- Do not close or terminate this process while testing.
-- Anvil mines blocks on demand (whenever a transaction is broadcasted).
+> [!NOTE]
+> Do not close or terminate Terminal 1 while testing. Anvil mines blocks on demand whenever a raw transaction is broadcasted.
 
 ---
 
 ### Step 2: Deploy `ChainPayGateway.sol` Smart Contract to Anvil
 
-Open **Terminal 2** and run `forge create` to compile and deploy the payment router contract onto Anvil:
+Open **Terminal 2** and deploy the contract using Forge:
 
 ```bash
 forge create contracts/ChainPayGateway.sol:ChainPayGateway \
@@ -90,12 +119,9 @@ forge create contracts/ChainPayGateway.sol:ChainPayGateway \
 Compiling 1 files with Solc 0.8.20
 Compiler run successful!
 Deployer: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-Deployed to: 0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6
+Deployed to: 0x5FbDB2315678afecb367f032d93F642f64180aa3
 Transaction hash: 0xd134f4045a0b6076d3ac87602efa7be3beb414603d21d3e5e4f3bed9da0e3827
 ```
-
-> [!IMPORTANT]
-> The deployed contract address is `0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6`. This address is pre-configured in `application-test.yml`.
 
 ---
 
@@ -107,21 +133,42 @@ In **Terminal 2**, start the Spring Boot engine using the local `test` profile:
 ./gradlew bootRun --args='--spring.profiles.active=test'
 ```
 
-#### What to Expect in Server Startup Logs:
+#### Expected Server Startup Logs:
 Look for these key log lines confirming successful initialization and seed data generation:
 
 ```log
 2026-09-01T03:37:28.168+05:30 INFO [chainpay-core] com.chainpay.core.ChainPayApplication : Started ChainPayApplication in 3.856 seconds
 2026-09-01T03:37:28.294+05:30 INFO [chainpay-core] com.chainpay.core.config.DataSeeder   : Seeded default admin user (username: admin)
-2026-09-01T03:37:28.369+05:30 INFO [chainpay-core] com.chainpay.core.config.DataSeeder   : Seeded default Assets: USDC (ID: 068fba95-cbfd-4cdf-acee-201f86a63535) and Native ETH (ID: 056d8e17-0847-4ad1-b686-2197c9afe327)
-2026-09-01T03:37:28.369+05:30 INFO [chainpay-core] com.chainpay.core.config.DataSeeder   : Seeded default Accounts: Customer USDC (ID: f74ae1dc-664a-42d2-b3fc-99a53f216b64), Customer ETH (ID: 1475e992-31ee-46ed-82d9-f347f0c4a980), and Hot Wallet (ID: e97153bf-612a-457f-8c5d-d66eb01a5337)
+2026-09-01T03:37:28.369+05:30 INFO [chainpay-core] com.chainpay.core.config.DataSeeder   : Seeded default Assets: USDC and Native ETH
+2026-09-01T03:37:28.369+05:30 INFO [chainpay-core] com.chainpay.core.config.DataSeeder   : Seeded default Accounts: Customer USDC, Customer ETH, and Hot Wallet
 ```
 
 ---
 
-## 🧪 4. End-to-End Automated Testing Script (Python)
+## 🧪 4. Execution Options & Test Automation
 
-Create or run the following complete Python test script (`test_flow.py`) in **Terminal 3**. This script executes authentication, submits Native ETH payouts through `ChainPayGateway.sol`, tracks state machine progress, and queries telemetry.
+### Option A: Interactive 7-Step Verification Suite (`scripts/run-demo.py`)
+
+Open **Terminal 3** and run the interactive demonstration harness:
+
+```bash
+python3 scripts/run-demo.py
+```
+
+This executes all 7 payment subsystems sequentially:
+1. **Security & JWT Auth Filter**: Authenticates via `POST /api/v1/auth/login` and receives `HMAC-SHA256` token.
+2. **Double-Entry Ledger Discovery**: Verifies dynamic account balances (`SUM(CREDIT) - SUM(DEBIT)`) and zero-sum invariants.
+3. **Single Native ETH Payout Submission**: Submits a payout with `Idempotency-Key` and checks state progression (`PENDING`).
+4. **Finite State Machine & Block Confirmation**: Polls status until mined receipt confirmation advances status (`SUBMITTED` ➔ `CONFIRMING` ➔ `COMPLETED`).
+5. **Batch Smart Contract Execution**: Submits multi-item disbursements to `ChainPayGateway.sol` via `dispatchBatchPayout`.
+6. **3-Way Financial Reconciliation**: Triggers `ReconciliationJob` comparing DB Payouts, Ledger Journal Entries, and live Anvil RPC `ethGetBalance`.
+7. **System Health & Telemetry Summary**: Queries `/api/v1/copilot/summary` and `/api/v1/health`.
+
+---
+
+### Option B: Custom Standalone Python Test Script (`test_flow.py`)
+
+You can also run a custom Python script to test individual REST endpoints step-by-step:
 
 ```python
 import urllib.request
@@ -165,8 +212,8 @@ with urllib.request.urlopen(acc_req) as resp:
 
 # Submit Native ETH Payout
 payout_payload = json.dumps({
-    "accountId": "1475e992-31ee-46ed-82d9-f347f0c4a980", # Replace with your seeded Customer ETH Account ID
-    "assetId": "056d8e17-0847-4ad1-b686-2197c9afe327",     # Replace with your seeded Native ETH Asset ID
+    "accountId": "1475e992-31ee-46ed-82d9-f347f0c4a980", # Customer ETH Account ID
+    "assetId": "056d8e17-0847-4ad1-b686-2197c9afe327",     # Native ETH Asset ID
     "destinationAddress": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
     "amount": 500000000000000000 # 0.5 ETH in Wei
 }).encode()
@@ -212,29 +259,63 @@ with urllib.request.urlopen(summary_req) as resp:
 
 ---
 
+### Option C: cURL Command Reference
+
+You can also test the endpoints directly using `curl`:
+
+1. **Login & Get JWT Token**:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username":"admin","password":"admin123"}'
+   ```
+
+2. **Check System Health & Ledger Invariants**:
+   ```bash
+   curl -X GET http://localhost:8080/api/v1/health
+   ```
+
+3. **Submit Single Payout**:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/payouts \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer <YOUR_JWT_TOKEN>" \
+     -H "Idempotency-Key: idemp-curl-001" \
+     -d '{
+       "accountId": "<CUSTOMER_ETH_ACCOUNT_ID>",
+       "assetId": "<ETH_ASSET_ID>",
+       "destinationAddress": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+       "amount": 500000000000000000
+     }'
+   ```
+
+4. **Trigger Immediate 3-Way Reconciliation Audit**:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/reconciliation/trigger \
+     -H "Authorization: Bearer <YOUR_JWT_TOKEN>"
+   ```
+
+---
+
 ## 🔍 5. Reading Anvil Terminal Logs
 
-When the Python test script executes a payout, observe **Terminal 1** (Anvil). You will see real-time RPC calls and smart contract event emissions:
+When a payout is executed, observe **Terminal 1** (Anvil). You will see real-time RPC calls and smart contract event emissions:
 
-### Smart Contract Call (`dispatchNativePayout`):
+### Smart Contract Execution Log Output:
 ```text
 eth_sendRawTransaction
 
     Transaction: 0xfaf9fd8a95ef0c7f332893c268d9bb67a291cf6626ae60397fd37f7dd12081ba
     Contract: null
     From: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
-    To: 0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6 (ChainPayGateway)
+    To: 0x5FbDB2315678afecb367f032d93F642f64180aa3 (ChainPayGateway)
     Value: 500000000000000000 wei
     Gas Used: 55431
-
-    Block Number: 10
-    Block Hash: 0x9cfc582988ae7a3590700addac3a613e155be59e8311f8e02a04f498dc789dfe
 
     Events:
       PayoutDispatched(
         payoutId: 0x3263653362656631...,
         merchant: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266,
-        asset: 0x0000000000000000000000000000000000000000,
         recipient: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8,
         amount: 500000000000000000,
         memo: "CHAINPAY:2ce3bef1-de4e-46e0-83f6-5c4b2fe74844"
@@ -243,17 +324,23 @@ eth_sendRawTransaction
 
 ---
 
-## ⚡ 6. Troubleshooting & Common Gotchas
+## ⚡ 6. Operational Troubleshooting & Gotchas
 
 ### 1. `RPC Error: Transaction rejected: nonce too low`
-- **Cause**: EVM account nonces must strictly increment ($0, 1, 2, \dots$). If the server restarts while Anvil is already at Nonce #10, an old nonce attempt will be rejected.
-- **Fix**: ChainPay uses bulletproof 3-way monotonic nonce calculation:
+- **Cause**: EVM nonces must strictly increment ($0, 1, 2, \dots$). If the server restarts while Anvil is already at Nonce #10, standard RPC lookups hit race conditions.
+- **Fix**: ChainPay Core uses 3-way monotonic nonce calculation:
   $$\text{NextNonce} = \max\Big(\text{RPC Pending Count}, \; \text{DB Max Nonce} + 1, \; \text{Memory Tracker} + 1\Big)$$
 
 ### 2. Payout Status Remains `CONFIRMING`
-- **Cause**: Anvil only mines a block when a new transaction is broadcasted or when `anvil_mine` is called via RPC. If `confirmations-required` is set to `2` in `application-test.yml`, the status will remain `CONFIRMING` until 1 more block is mined.
-- **Fix**: Send a second test transaction or execute `curl -H "Content-Type: application/json" -X POST --data '{"jsonrpc":"2.0","method":"anvil_mine","params":[1],"id":1}' http://localhost:8545` to manually advance Anvil's block height.
+- **Cause**: Anvil mines blocks on demand (when a transaction is broadcasted). If block finality requires additional blocks, status waits for depth.
+- **Fix**: Mine an instant manual block on Anvil using RPC:
+  ```bash
+  curl -H "Content-Type: application/json" \
+       -X POST \
+       --data '{"jsonrpc":"2.0","method":"anvil_mine","params":[1],"id":1}' \
+       http://localhost:8545
+  ```
 
-### 3. Seed Data UUID Mismatch Upon Restart
-- **Cause**: The test profile uses in-memory H2 DB (`jdbc:h2:mem:...`), which re-generates UUIDs on each application restart.
-- **Fix**: Always check the startup logs in Terminal 2 to obtain the newly seeded `Customer Account ID` and `Asset ID` before making `POST /api/v1/payouts` requests.
+### 3. Seed Data UUID Mismatch Upon Server Restart
+- **Cause**: In-memory test databases re-generate entity UUIDs on fresh startup.
+- **Fix**: Run `python3 scripts/run-demo.py` directly, as it automatically queries seeded account and asset IDs dynamically before submitting payouts.
